@@ -1,0 +1,7 @@
+com/pdfreader/model/ProcessingResult.class
+com/pdfreader/controller/PdfController.class
+com/pdfreader/config/WebConfig.class
+com/pdfreader/service/PdfProcessingService$1.class
+com/pdfreader/service/PdfProcessingService.class
+com/pdfreader/model/ProcessingResult$StatementData.class
+com/pdfreader/PdfProcessorApplication.class
