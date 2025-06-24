@@ -44,6 +44,16 @@ function App() {
     }
   }, [result]);
 
+  // Log extracted PDF and page numbers to console
+  useEffect(() => {
+    if (result && result.success && result.statements.length > 0) {
+      console.log('Extracted PDF:', selectedPdf);
+      result.statements.forEach(statement => {
+        console.log(`Statement: ${statement.name}, Page: ${statement.pageNumber}`);
+      });
+    }
+  }, [result, selectedPdf]);
+
   const loadAvailablePdfs = async () => {
     try {
       const response = await axios.get<string[]>('/api/pdf/documents');
@@ -178,7 +188,6 @@ function App() {
                   </button>
                 ))}
               </div>
-
               <div className="table-content">
                 {result.statements.length > 0 && (
                   <div>
