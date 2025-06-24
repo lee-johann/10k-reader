@@ -22,15 +22,16 @@ def main():
     print("🔍 PDF Processor Demo")
     print("=" * 60)
     
-    # Step 1: Find the page with "CONSOLIDATED STATEMENTS OF INCOME"
+    # Step 1: Find the page with "CONSOLIDATED STATEMENTS OF INCOME" but not "INDEX"
     search_text = "CONSOLIDATED STATEMENTS OF INCOME"
+    exclude_text = "INDEX"
     min_page = 10
     
-    print(f"Searching for: '{search_text}' starting from page {min_page}")
+    print(f"Searching for: '{search_text}' (excluding '{exclude_text}') starting from page {min_page}")
     target_page = find_page_with_text(str(pdf_path), search_text, min_page)
     
     if target_page is None:
-        print(f"❌ No page found with text '{search_text}' after page {min_page}")
+        print(f"❌ No page found with text '{search_text}' (excluding '{exclude_text}') after page {min_page}")
         sys.exit(1)
     
     # PROMINENT PAGE NUMBER DISPLAY

@@ -32,18 +32,18 @@ def process_pdf(pdf_path, search_text, min_page, output_dir, method):
     PDF_PATH: Path to the PDF file to process
     """
     click.echo(f"Processing PDF: {pdf_path}")
-    click.echo(f"Searching for text: '{search_text}'")
+    click.echo(f"Searching for text: '{search_text}' (excluding 'INDEX')")
     click.echo(f"Starting from page: {min_page}")
     
     # Create output directory
     output_path = Path(output_dir)
     output_path.mkdir(exist_ok=True)
     
-    # Step 1: Find the page with the specified text
+    # Step 1: Find the page with the specified text (and not the excluded text)
     target_page = find_page_with_text(pdf_path, search_text, min_page)
     
     if target_page is None:
-        click.echo(f"❌ No page found with text '{search_text}' after page {min_page}")
+        click.echo(f"❌ No page found with text '{search_text}' (excluding 'INDEX') after page {min_page}")
         sys.exit(1)
     
     click.echo(f"✅ Found text on page {target_page}")
@@ -63,9 +63,11 @@ def process_pdf(pdf_path, search_text, min_page, output_dir, method):
 
 def find_page_with_text(pdf_path, search_text, min_page):
     """
-    Find the first page containing the specified text, starting from min_page.
+    Find the first page containing the specified text, starting from min_page,
+    but NOT containing the excluded text.
     Returns the page number (1-indexed) or None if not found.
     """
+    exclude_text = "INDEX"
     try:
         with open(pdf_path, 'rb') as file:
             pdf_reader = PyPDF2.PdfReader(file)
@@ -74,8 +76,10 @@ def find_page_with_text(pdf_path, search_text, min_page):
             for page_num in range(min_page - 1, len(pdf_reader.pages)):
                 page = pdf_reader.pages[page_num]
                 text = page.extract_text()
-                
-                if search_text.upper() in text.upper():
+                if not text:
+                    continue
+                if (search_text.upper() in text.upper() and
+                    exclude_text.upper() not in text.upper()):
                     return page_num + 1  # Return 1-indexed page number
                     
     except Exception as e:
@@ -117,70 +121,88 @@ def extract_table_to_excel(pdf_path, output_path, method):
     """
     excel_path = output_path / "extracted_table.xlsx"
     
-    try:
-        if method == 'tabula':
-            # Use tabula-py for table extraction
-            tables = tabula.read_pdf(str(pdf_path), pages='all')
+    # Try the specified method first, then fall back to others
+    methods_to_try = [method]
+    if method != 'pdfplumber':
+        methods_to_try.append('pdfplumber')
+    if method != 'tabula':
+        methods_to_try.append('tabula')
+    
+    for current_method in methods_to_try:
+        try:
+            click.echo(f"Trying table extraction with {current_method}...")
             
-            if tables:
-                # Combine all tables into one DataFrame
-                combined_df = pd.concat(tables, ignore_index=True)
-                combined_df.to_excel(excel_path, index=False)
-                click.echo(f"📊 Extracted {len(tables)} tables using tabula")
-            else:
-                click.echo("⚠️  No tables found using tabula")
-                return None
+            if current_method == 'tabula':
+                # Use tabula-py for table extraction
+                tables = tabula.read_pdf(str(pdf_path), pages='all')
                 
-        elif method == 'camelot':
-            # Use camelot-py for table extraction
-            tables = camelot.read_pdf(str(pdf_path), pages='all')
-            
-            if tables:
-                # Combine all tables into one DataFrame
-                dfs = []
-                for table in tables:
-                    df = table.df
-                    # Clean up the DataFrame
-                    df = df.replace('', pd.NA).dropna(how='all')
-                    dfs.append(df)
-                
-                if dfs:
-                    combined_df = pd.concat(dfs, ignore_index=True)
+                if tables:
+                    # Combine all tables into one DataFrame
+                    combined_df = pd.concat(tables, ignore_index=True)
                     combined_df.to_excel(excel_path, index=False)
-                    click.echo(f"📊 Extracted {len(tables)} tables using camelot")
+                    click.echo(f"📊 Extracted {len(tables)} tables using tabula")
+                    return excel_path
                 else:
-                    click.echo("⚠️  No valid tables found using camelot")
-                    return None
-            else:
-                click.echo("⚠️  No tables found using camelot")
-                return None
-                
-        elif method == 'pdfplumber':
-            # Use pdfplumber for table extraction
-            with pdfplumber.open(pdf_path) as pdf:
-                all_tables = []
-                for page in pdf.pages:
-                    tables = page.extract_tables()
+                    click.echo("⚠️  No tables found using tabula")
+                    
+            elif current_method == 'camelot':
+                # Use camelot-py for table extraction
+                try:
+                    tables = camelot.read_pdf(str(pdf_path), pages='all')
+                    
                     if tables:
+                        # Combine all tables into one DataFrame
+                        dfs = []
                         for table in tables:
-                            # Convert table to DataFrame
-                            df = pd.DataFrame(table[1:], columns=table[0])
+                            df = table.df
+                            # Clean up the DataFrame
                             df = df.replace('', pd.NA).dropna(how='all')
-                            all_tables.append(df)
-                
-                if all_tables:
-                    combined_df = pd.concat(all_tables, ignore_index=True)
-                    combined_df.to_excel(excel_path, index=False)
-                    click.echo(f"📊 Extracted {len(all_tables)} tables using pdfplumber")
-                else:
-                    click.echo("⚠️  No tables found using pdfplumber")
-                    return None
+                            dfs.append(df)
+                        
+                        if dfs:
+                            combined_df = pd.concat(dfs, ignore_index=True)
+                            combined_df.to_excel(excel_path, index=False)
+                            click.echo(f"📊 Extracted {len(tables)} tables using camelot")
+                            return excel_path
+                        else:
+                            click.echo("⚠️  No valid tables found using camelot")
+                    else:
+                        click.echo("⚠️  No tables found using camelot")
+                except Exception as e:
+                    if "Ghostscript is not installed" in str(e):
+                        click.echo("⚠️  Ghostscript not found for camelot, trying next method...")
+                        continue
+                    else:
+                        raise e
+                        
+            elif current_method == 'pdfplumber':
+                # Use pdfplumber for table extraction
+                with pdfplumber.open(pdf_path) as pdf:
+                    all_tables = []
+                    for page in pdf.pages:
+                        tables = page.extract_tables()
+                        if tables:
+                            for table in tables:
+                                # Convert table to DataFrame
+                                if table and len(table) > 1:  # Ensure we have headers and data
+                                    df = pd.DataFrame(table[1:], columns=table[0])
+                                    df = df.replace('', pd.NA).dropna(how='all')
+                                    all_tables.append(df)
+                    
+                    if all_tables:
+                        combined_df = pd.concat(all_tables, ignore_index=True)
+                        combined_df.to_excel(excel_path, index=False)
+                        click.echo(f"📊 Extracted {len(all_tables)} tables using pdfplumber")
+                        return excel_path
+                    else:
+                        click.echo("⚠️  No tables found using pdfplumber")
         
-        return excel_path
-        
-    except Exception as e:
-        click.echo(f"❌ Error extracting tables: {e}")
-        return None
+        except Exception as e:
+            click.echo(f"❌ Error with {current_method}: {e}")
+            continue
+    
+    click.echo("❌ All table extraction methods failed")
+    return None
 
 
 if __name__ == '__main__':
