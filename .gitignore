@@ -141,6 +141,9 @@ output/
 test_output/
 *.pdf
 !documents/*.pdf
+*.xlsx
+*.xls
+*.csv
 
 # Keep the main JAR for deployment (optional - remove if you don't want to track it)
 !backend/target/pdf-processor-backend-1.0.0.jar 
