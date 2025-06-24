@@ -378,7 +378,7 @@ def extract_all_statements_to_excel(pdf_path, output_path, pdf_name):
     # Define the statements to look for
     statements = [
         "CONSOLIDATED STATEMENTS OF INCOME",
-        "CONSOLIDATED STATEMENTS OF STOCKHOLDERS' EQUITY", 
+        "CONSOLIDATED BALANCE SHEETS", 
         "CONSOLIDATED STATEMENTS OF CASH FLOWS"
     ]
     
