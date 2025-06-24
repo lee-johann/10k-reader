@@ -75,7 +75,7 @@ public class PdfProcessingService {
             List<ProcessingResult.StatementData> statements = parseExcelFile();
             
             return new ProcessingResult(
-                "/documents/" + filename,
+                null,
                 statements,
                 "Processing completed successfully",
                 true

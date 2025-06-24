@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
@@ -15,7 +15,7 @@ interface StatementData {
 }
 
 interface ProcessingResult {
-  pdfUrl: string;
+  pdfUrl?: string;
   statements: StatementData[];
   message: string;
   success: boolean;
@@ -27,13 +27,22 @@ function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [result, setResult] = useState<ProcessingResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState(0);
+  const [activeTab, setActiveTab] = useState<string>('');
   const [currentPage, setCurrentPage] = useState(1);
+  const [numPages, setNumPages] = useState<number | null>(null);
+  const pdfViewerRef = useRef<HTMLDivElement>(null);
 
   // Load available PDFs on component mount
   useEffect(() => {
     loadAvailablePdfs();
   }, []);
+
+  // Set initial active tab when result is loaded
+  useEffect(() => {
+    if (result && result.success && result.statements.length > 0) {
+      setActiveTab(result.statements[0].name);
+    }
+  }, [result]);
 
   const loadAvailablePdfs = async () => {
     try {
@@ -84,10 +93,16 @@ function App() {
     }
   };
 
-  const handleTabClick = (index: number) => {
-    setActiveTab(index);
-    if (result && result.statements[index]) {
-      setCurrentPage(result.statements[index].pageNumber);
+  const handleTabClick = (statementName: string, pageNumber: number) => {
+    setActiveTab(statementName);
+    setCurrentPage(pageNumber);
+
+    // Scroll to the specific page in the PDF
+    if (pdfViewerRef.current && numPages) {
+      const pageElement = pdfViewerRef.current.querySelector(`[data-page-number="${pageNumber}"]`);
+      if (pageElement) {
+        pageElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
     }
   };
 
@@ -131,46 +146,71 @@ function App() {
 
         {result && result.success && (
           <div className="results-section">
-            <div className="pdf-viewer">
-              <h3>PDF Viewer (Page {currentPage})</h3>
-              <Document file={`http://localhost:8080${result.pdfUrl}`}>
-                <Page pageNumber={currentPage} width={400} />
+            <div className="pdf-viewer" ref={pdfViewerRef}>
+              <h3>PDF Viewer</h3>
+              <Document
+                file={`/documents/${selectedPdf}`}
+                onLoadSuccess={({ numPages }) => setNumPages(numPages)}
+              >
+                {numPages && Array.from(new Array(numPages), (el, index) => (
+                  <Page
+                    key={`page_${index + 1}`}
+                    pageNumber={index + 1}
+                    width={400}
+                    renderTextLayer={false}
+                    renderAnnotationLayer={false}
+                    data-page-number={index + 1}
+                  />
+                ))}
               </Document>
             </div>
 
-            <div className="table-viewer">
+            <div className="tables-section">
+              <h3>Extracted Tables</h3>
               <div className="tabs">
                 {result.statements.map((statement, index) => (
                   <button
-                    key={index}
-                    className={`tab ${activeTab === index ? 'active' : ''}`}
-                    onClick={() => handleTabClick(index)}
+                    key={statement.name}
+                    className={`tab ${activeTab === statement.name ? 'active' : ''}`}
+                    onClick={() => handleTabClick(statement.name, statement.pageNumber)}
                   >
                     {statement.name} (Page {statement.pageNumber})
                   </button>
                 ))}
               </div>
 
-              <div className="table-container">
-                {result.statements[activeTab] && (
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        {result.statements[activeTab].headers.map((header, index) => (
-                          <th key={index}>{header}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {result.statements[activeTab].tableData.map((row, rowIndex) => (
-                        <tr key={rowIndex}>
-                          {result.statements[activeTab].headers.map((header, colIndex) => (
-                            <td key={colIndex}>{row[header] || ''}</td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+              <div className="table-content">
+                {result.statements.length > 0 && (
+                  <div>
+                    {(() => {
+                      const activeStatement = result.statements.find(s => s.name === activeTab) || result.statements[0];
+                      return (
+                        <div>
+                          <h4>{activeStatement.name} (Page {activeStatement.pageNumber})</h4>
+                          <div className="table-container">
+                            <table>
+                              <thead>
+                                <tr>
+                                  {activeStatement.headers.map((header: string, index: number) => (
+                                    <th key={index}>{header}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {activeStatement.tableData.map((row: { [key: string]: string }, rowIndex: number) => (
+                                  <tr key={rowIndex}>
+                                    {activeStatement.headers.map((header: string, colIndex: number) => (
+                                      <td key={colIndex}>{row[header] || ''}</td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
                 )}
               </div>
             </div>
