@@ -20,7 +20,7 @@ import camelot
 @click.argument('pdf_path', type=click.Path(exists=True))
 @click.option('--search-text', default='CONSOLIDATED STATEMENTS OF INCOME', 
               help='Text to search for in PDF pages')
-@click.option('--min-page', default=10, type=int,
+@click.option('--min-page', default=3, type=int,
               help='Minimum page number to search from')
 @click.option('--output-dir', default='./output',
               help='Output directory for extracted files')
@@ -33,7 +33,7 @@ def process_pdf(pdf_path, search_text, min_page, output_dir, method):
     PDF_PATH: Path to the PDF file to process
     """
     click.echo(f"Processing PDF: {pdf_path}")
-    click.echo(f"Searching for text: '{search_text}' (excluding 'INDEX')")
+    click.echo(f"Searching for text: '{search_text}' (excluding 'Equity')")
     click.echo(f"Starting from page: {min_page}")
     
     # Create output directory
@@ -44,7 +44,7 @@ def process_pdf(pdf_path, search_text, min_page, output_dir, method):
     target_page = find_page_with_text(pdf_path, search_text, min_page)
     
     if target_page is None:
-        click.echo(f"❌ No page found with text '{search_text}' (excluding 'INDEX') after page {min_page}")
+        click.echo(f"❌ No page found with text '{search_text}' (excluding 'Equity') after page {min_page}")
         sys.exit(1)
     
     click.echo(f"✅ Found text on page {target_page}")
@@ -68,7 +68,6 @@ def find_page_with_text(pdf_path, search_text, min_page):
     but NOT containing the excluded text.
     Returns the page number (1-indexed) or None if not found.
     """
-    exclude_text = "INDEX"
     try:
         with open(pdf_path, 'rb') as file:
             pdf_reader = PyPDF2.PdfReader(file)
@@ -79,8 +78,11 @@ def find_page_with_text(pdf_path, search_text, min_page):
                 text = page.extract_text()
                 if not text:
                     continue
-                if (search_text.upper() in text.upper() and
-                    exclude_text.upper() not in text.upper()):
+                upper_text = text.upper()
+                # Exclude if there are two or more mentions of 'TABLE OF CONTENTS' or any mention of 'INDEX'
+                if (upper_text.count('TABLE OF CONTENTS') >= 2 or 'INDEX' in upper_text):
+                    continue
+                if search_text.upper() in upper_text:
                     return page_num + 1  # Return 1-indexed page number
                     
     except Exception as e:
@@ -193,12 +195,66 @@ def process_table_data(df):
     return pd.DataFrame(padded_rows, columns=column_names)
 
 
+def extract_header_info(pdf_path):
+    """
+    Extract header information from the PDF page, specifically looking for year headers.
+    Returns a list of year headers if found.
+    """
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            page = pdf.pages[0]  # We're working with a single extracted page
+            
+            # Extract all text from the page
+            text = page.extract_text()
+            
+            # Look for year patterns in the text
+            # Common patterns: "Year Ended December 31," followed by years
+            year_pattern = r'Year Ended December 31,?\s*((?:\d{4}\s*)+)'
+            match = re.search(year_pattern, text)
+            
+            if match:
+                years_text = match.group(1)
+                # Split by whitespace and clean up
+                years = [year.strip() for year in years_text.split() if year.strip().isdigit()]
+                
+                # Create descriptive headers by concatenating with "Year Ended December 31"
+                headers = []
+                for year in years:
+                    header = f"Year Ended December 31, {year}"
+                    headers.append(header)
+                
+                return headers
+            
+            # Alternative: look for just years in sequence
+            year_sequence = re.findall(r'\b(20\d{2})\b', text)
+            if len(year_sequence) >= 2:  # At least 2 years to be meaningful
+                # Create descriptive headers by concatenating with "Year Ended December 31"
+                headers = []
+                for year in year_sequence[:3]:  # Use up to 3 years
+                    header = f"Year Ended December 31, {year}"
+                    headers.append(header)
+                return headers
+            
+            return None
+            
+    except Exception as e:
+        click.echo(f"❌ Error extracting header info: {e}")
+        return None
+
+
 def extract_table_to_excel(pdf_path, output_path, method):
     """
     Extract tables from the PDF and save to Excel.
     Returns the path to the Excel file.
     """
     excel_path = output_path / "extracted_table.xlsx"
+    
+    # First, try to extract header information
+    header_years = extract_header_info(pdf_path)
+    if header_years:
+        click.echo(f"📅 Found year headers: {header_years}")
+    else:
+        click.echo("⚠️  No year headers found, using default column names")
     
     # Try the specified method first, then fall back to others
     methods_to_try = [method]
@@ -220,6 +276,12 @@ def extract_table_to_excel(pdf_path, output_path, method):
                     combined_df = pd.concat(tables, ignore_index=True)
                     # Process the table data
                     processed_df = process_table_data(combined_df)
+                    
+                    # Update column names if we found year headers
+                    if header_years and len(header_years) >= len(processed_df.columns) - 1:
+                        new_columns = ['Description'] + header_years[:len(processed_df.columns) - 1]
+                        processed_df.columns = new_columns
+                    
                     processed_df.to_excel(excel_path, index=False)
                     click.echo(f"📊 Extracted and processed {len(tables)} tables using tabula")
                     return excel_path
@@ -244,6 +306,12 @@ def extract_table_to_excel(pdf_path, output_path, method):
                             combined_df = pd.concat(dfs, ignore_index=True)
                             # Process the table data
                             processed_df = process_table_data(combined_df)
+                            
+                            # Update column names if we found year headers
+                            if header_years and len(header_years) >= len(processed_df.columns) - 1:
+                                new_columns = ['Description'] + header_years[:len(processed_df.columns) - 1]
+                                processed_df.columns = new_columns
+                            
                             processed_df.to_excel(excel_path, index=False)
                             click.echo(f"📊 Extracted and processed {len(tables)} tables using camelot")
                             return excel_path
@@ -269,6 +337,9 @@ def extract_table_to_excel(pdf_path, output_path, method):
                                 # Convert table to DataFrame
                                 if table and len(table) > 1:  # Ensure we have headers and data
                                     df = pd.DataFrame(table[1:], columns=table[0])
+                                    # Ensure unique column names
+                                    if df.columns.duplicated().any():
+                                        df.columns = [f"{col}_{i}" if df.columns.duplicated()[i] else col for i, col in enumerate(df.columns)]
                                     df = df.replace('', pd.NA).dropna(how='all')
                                     all_tables.append(df)
                     
@@ -276,6 +347,12 @@ def extract_table_to_excel(pdf_path, output_path, method):
                         combined_df = pd.concat(all_tables, ignore_index=True)
                         # Process the table data
                         processed_df = process_table_data(combined_df)
+                        
+                        # Update column names if we found year headers
+                        if header_years and len(header_years) >= len(processed_df.columns) - 1:
+                            new_columns = ['Description'] + header_years[:len(processed_df.columns) - 1]
+                            processed_df.columns = new_columns
+                        
                         processed_df.to_excel(excel_path, index=False)
                         click.echo(f"📊 Extracted and processed {len(all_tables)} tables using pdfplumber")
                         return excel_path
