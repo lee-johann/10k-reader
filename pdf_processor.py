@@ -129,55 +129,67 @@ def process_table_data(df):
     for index, row in df.iterrows():
         # Convert row to string and process each cell
         row_str = ' '.join(str(cell) for cell in row if pd.notna(cell) and str(cell).strip())
-        
         if not row_str.strip():
             continue
-            
         # Strip dollar signs and clean up
         row_str = row_str.replace('$', '').strip()
-        
-        # Split by whitespace to separate text from numbers
         parts = row_str.split()
-        
         if len(parts) < 2:
             continue
-            
-        # Find where text ends and numbers begin
-        text_parts = []
+        # Traverse from the end, collecting numbers or bracketed negatives
         number_parts = []
-        
-        for part in parts:
-            # Check if part is a number (with commas)
-            if re.match(r'^[\d,]+$', part.replace(',', '')):
-                number_parts.append(part)
-            else:
-                text_parts.append(part)
-        
-        if text_parts and number_parts:
-            # Combine text parts
-            text_column = ' '.join(text_parts)
+        i = len(parts) - 1
+        while i >= 0:
+            part = parts[i]
             
-            # Create row with text and numbers
+            # Check if this is a number according to our rules
+            is_number = False
+            is_bracketed_number = False
+            
+            # Rule 1: Immediately surrounded by brackets (like (3514))
+            if part.startswith('(') and part.endswith(')') and len(part) > 2:
+                bracket_content = part[1:-1]
+                if re.match(r'^[\d,]+$', bracket_content):
+                    # Check if there's a space before the opening bracket in original string
+                    idx = row_str.find(part)
+                    if idx == 0 or row_str[idx - 1] == ' ':
+                        is_bracketed_number = True
+                        is_number = True
+            
+            # Rule 2: No brackets at all (like 3514)
+            elif not '(' in part and not ')' in part:
+                clean_part = part.replace(',', '')
+                if re.match(r'^-?[\d]+\.?[\d]*$', clean_part):
+                    is_number = True
+            
+            # Rule 3: Starts with dollar sign (like $3514) - already handled by stripping $ above
+            # This is covered by Rule 2 since we strip $ signs earlier
+            
+            if is_number:
+                if is_bracketed_number:
+                    number_str = bracket_content.replace(',', '')
+                    number_parts.insert(0, f"-{number_str}")
+                else:
+                    number_parts.insert(0, part.replace(',', ''))
+                i -= 1
+            else:
+                break
+        # Everything before the numbers is the description
+        text_parts = parts[:i+1]
+        if text_parts and number_parts:
+            text_column = ' '.join(text_parts)
             processed_row = [text_column] + number_parts
             processed_rows.append(processed_row)
-    
     if not processed_rows:
         return df
-    
-    # Create new DataFrame with proper columns
     max_cols = max(len(row) for row in processed_rows)
-    
-    # Create column names
     column_names = ['Description']
     for i in range(1, max_cols):
         column_names.append(f'Value_{i}')
-    
-    # Pad rows to have same number of columns
     padded_rows = []
     for row in processed_rows:
         padded_row = row + [''] * (max_cols - len(row))
         padded_rows.append(padded_row)
-    
     return pd.DataFrame(padded_rows, columns=column_names)
 
 
