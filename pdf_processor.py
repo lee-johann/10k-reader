@@ -10,6 +10,7 @@ import pdfplumber
 import pandas as pd
 import os
 import sys
+import re
 from pathlib import Path
 import tabula
 import camelot
@@ -114,6 +115,72 @@ def extract_page(pdf_path, page_number, output_path):
         return None
 
 
+def process_table_data(df):
+    """
+    Process the extracted table data to separate text from numbers and clean up formatting.
+    Expects format like: "Sales and marketing $26,567 $27,917 $27,808"
+    Returns: DataFrame with proper columns
+    """
+    if df.empty:
+        return df
+    
+    processed_rows = []
+    
+    for index, row in df.iterrows():
+        # Convert row to string and process each cell
+        row_str = ' '.join(str(cell) for cell in row if pd.notna(cell) and str(cell).strip())
+        
+        if not row_str.strip():
+            continue
+            
+        # Strip dollar signs and clean up
+        row_str = row_str.replace('$', '').strip()
+        
+        # Split by whitespace to separate text from numbers
+        parts = row_str.split()
+        
+        if len(parts) < 2:
+            continue
+            
+        # Find where text ends and numbers begin
+        text_parts = []
+        number_parts = []
+        
+        for part in parts:
+            # Check if part is a number (with commas)
+            if re.match(r'^[\d,]+$', part.replace(',', '')):
+                number_parts.append(part)
+            else:
+                text_parts.append(part)
+        
+        if text_parts and number_parts:
+            # Combine text parts
+            text_column = ' '.join(text_parts)
+            
+            # Create row with text and numbers
+            processed_row = [text_column] + number_parts
+            processed_rows.append(processed_row)
+    
+    if not processed_rows:
+        return df
+    
+    # Create new DataFrame with proper columns
+    max_cols = max(len(row) for row in processed_rows)
+    
+    # Create column names
+    column_names = ['Description']
+    for i in range(1, max_cols):
+        column_names.append(f'Value_{i}')
+    
+    # Pad rows to have same number of columns
+    padded_rows = []
+    for row in processed_rows:
+        padded_row = row + [''] * (max_cols - len(row))
+        padded_rows.append(padded_row)
+    
+    return pd.DataFrame(padded_rows, columns=column_names)
+
+
 def extract_table_to_excel(pdf_path, output_path, method):
     """
     Extract tables from the PDF and save to Excel.
@@ -139,8 +206,10 @@ def extract_table_to_excel(pdf_path, output_path, method):
                 if tables:
                     # Combine all tables into one DataFrame
                     combined_df = pd.concat(tables, ignore_index=True)
-                    combined_df.to_excel(excel_path, index=False)
-                    click.echo(f"📊 Extracted {len(tables)} tables using tabula")
+                    # Process the table data
+                    processed_df = process_table_data(combined_df)
+                    processed_df.to_excel(excel_path, index=False)
+                    click.echo(f"📊 Extracted and processed {len(tables)} tables using tabula")
                     return excel_path
                 else:
                     click.echo("⚠️  No tables found using tabula")
@@ -161,8 +230,10 @@ def extract_table_to_excel(pdf_path, output_path, method):
                         
                         if dfs:
                             combined_df = pd.concat(dfs, ignore_index=True)
-                            combined_df.to_excel(excel_path, index=False)
-                            click.echo(f"📊 Extracted {len(tables)} tables using camelot")
+                            # Process the table data
+                            processed_df = process_table_data(combined_df)
+                            processed_df.to_excel(excel_path, index=False)
+                            click.echo(f"📊 Extracted and processed {len(tables)} tables using camelot")
                             return excel_path
                         else:
                             click.echo("⚠️  No valid tables found using camelot")
@@ -191,8 +262,10 @@ def extract_table_to_excel(pdf_path, output_path, method):
                     
                     if all_tables:
                         combined_df = pd.concat(all_tables, ignore_index=True)
-                        combined_df.to_excel(excel_path, index=False)
-                        click.echo(f"📊 Extracted {len(all_tables)} tables using pdfplumber")
+                        # Process the table data
+                        processed_df = process_table_data(combined_df)
+                        processed_df.to_excel(excel_path, index=False)
+                        click.echo(f"📊 Extracted and processed {len(all_tables)} tables using pdfplumber")
                         return excel_path
                     else:
                         click.echo("⚠️  No tables found using pdfplumber")
