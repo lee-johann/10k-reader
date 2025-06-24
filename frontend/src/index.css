@@ -133,13 +133,13 @@ code {
 
 .pdf-viewer {
   flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+  background-color: #f5f5f5;
+  position: relative;
   width: 50%;
   max-height: 80vh;
   overflow-y: auto;
-  padding: 20px;
-  background: white;
-  border-radius: 8px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
   scroll-behavior: smooth;
   scroll-snap-type: y proximity;
 }
@@ -189,6 +189,7 @@ code {
   margin-bottom: 20px;
   width: 100%;
   max-width: 100%;
+  position: relative;
 }
 
 .pdf-viewer .react-pdf__Page__canvas {
@@ -196,6 +197,13 @@ code {
   width: 100%;
   height: auto;
   max-width: 100%;
+  position: relative;
+  z-index: 1;
+}
+
+/* Ensure canvas container has proper positioning for red boxes */
+.pdf-viewer .react-pdf__Page__canvas-container {
+  position: relative;
 }
 
 .tables-section {
@@ -307,4 +315,188 @@ code {
   color: #28a745;
   text-align: center;
   padding: 20px;
+}
+
+/* PDF text highlighting */
+.pdf-viewer .react-pdf__Page__textLayer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  overflow: hidden;
+  opacity: 0.2;
+  line-height: 1.0;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.pdf-viewer .react-pdf__Page__textLayer>span {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  pointer-events: none;
+}
+
+/* Highlight effect for hovered values */
+.pdf-viewer .react-pdf__Page__textLayer>span.highlighted {
+  background-color: #ffeb3b !important;
+  color: #000 !important;
+  opacity: 1 !important;
+  border-radius: 2px;
+  padding: 1px 2px;
+  animation: highlightPulse 0.5s ease-in-out;
+  z-index: 10;
+  position: relative;
+  box-shadow: 0 0 5px rgba(255, 235, 59, 0.8);
+}
+
+@keyframes highlightPulse {
+  0% {
+    opacity: 0.3;
+    background-color: #ffeb3b;
+  }
+
+  50% {
+    opacity: 1;
+    background-color: #ffc107;
+  }
+
+  100% {
+    opacity: 0.8;
+    background-color: #ffeb3b;
+  }
+}
+
+/* Alternative highlighting method using overlay */
+.pdf-viewer .react-pdf__Page {
+  position: relative;
+}
+
+.pdf-viewer .highlight-overlay {
+  position: absolute;
+  background-color: #ffeb3b;
+  opacity: 0.9;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 1000;
+  animation: highlightPulse 0.5s ease-in-out;
+  box-shadow: 0 0 10px rgba(255, 235, 59, 0.6);
+  border: 2px solid #ffc107;
+}
+
+/* Table cell hover effect */
+.table-container td:hover {
+  background-color: #e3f2fd;
+  cursor: pointer;
+  position: relative;
+}
+
+/* Enhanced table styling for better hover interaction */
+.table-container td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #ddd;
+  transition: background-color 0.2s ease;
+}
+
+.table-container td:hover::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(33, 150, 243, 0.1);
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Highlighting styles */
+.highlight {
+  background-color: yellow !important;
+  color: black !important;
+  position: relative;
+}
+
+.highlight-overlay {
+  position: absolute;
+  background-color: rgba(255, 255, 0, 0.7);
+  border: 2px solid #ff6b6b;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 1000;
+  animation: pulse 1s ease-in-out infinite alternate;
+}
+
+/* Red highlight box for matched items */
+.red-highlight-box {
+  position: absolute;
+  border: 3px solid #ff0000 !important;
+  background-color: rgba(255, 0, 0, 0.1) !important;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 1001;
+  box-shadow: 0 0 8px rgba(255, 0, 0, 0.6);
+  animation: redBoxPulse 0.8s ease-in-out infinite alternate;
+}
+
+/* Floating page overlay */
+.floating-page-overlay {
+  transition: opacity 0.2s ease-in-out;
+  border-radius: 4px;
+  overflow: hidden;
+  background: white;
+}
+
+.floating-page-overlay .react-pdf__Page {
+  margin: 0;
+  box-shadow: none;
+  border-radius: 0;
+}
+
+.floating-page-overlay .react-pdf__Page__canvas {
+  border-radius: 0;
+  margin: 0;
+}
+
+@keyframes redBoxPulse {
+  from {
+    border-color: #ff0000;
+    box-shadow: 0 0 8px rgba(255, 0, 0, 0.6);
+  }
+
+  to {
+    border-color: #ff4444;
+    box-shadow: 0 0 12px rgba(255, 0, 0, 0.8);
+  }
+}
+
+@keyframes pulse {
+  from {
+    opacity: 0.7;
+    transform: scale(1);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+}
+
+.debug-number-box {
+  position: absolute;
+  border: 2px dashed #00f;
+  background-color: rgba(0, 0, 255, 0.05);
+  pointer-events: none;
+  z-index: 1002;
+}
+
+.yellow-highlight-overlay {
+  position: absolute;
+  background-color: rgba(255, 255, 0, 0.5);
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 1001;
 }
