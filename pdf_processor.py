@@ -381,6 +381,8 @@ def extract_all_statements_to_excel(pdf_path, output_path, pdf_name):
     Extract all financial statements from the PDF and save to Excel with multiple tabs.
     Returns the path to the Excel file.
     """
+    # Convert output_path to Path object if it's a string
+    output_path = Path(output_path)
     excel_path = output_path / f"{pdf_name}_extracted.xlsx"
     
     # Define the statements to look for
@@ -425,7 +427,7 @@ def extract_all_statements_to_excel(pdf_path, output_path, pdf_name):
                 # Add comment to cell A1 with source information
                 worksheet = writer.sheets[tab_name]
                 cell_a1 = worksheet['A1']
-                comment_text = f"From page {target_page} of {pdf_path.name}"
+                comment_text = f"From page {target_page} of {Path(pdf_path).name}"
                 cell_a1.comment = openpyxl.comments.Comment(comment_text, "PDF Processor")
                 
                 click.echo(f"✅ Added {statement} to tab '{tab_name}' with source comment")
