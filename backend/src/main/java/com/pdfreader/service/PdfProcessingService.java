@@ -38,6 +38,7 @@ public class PdfProcessingService {
                 "extract_all_statements_to_excel('" + uploadPath.toString() + "', '" + OUTPUT_DIR + "', '" + 
                 originalFilename.replace(".pdf", "") + "')"
             );
+            processBuilder.directory(new File(".."));
             processBuilder.redirectErrorStream(true);
             
             Process process = processBuilder.start();
