@@ -107,11 +107,15 @@ function App() {
     setActiveTab(statementName);
     setCurrentPage(pageNumber);
 
-    // Scroll to the specific page in the PDF
+    // Scroll to the specific page in the PDF with faster scrolling
     if (pdfViewerRef.current && numPages) {
       const pageElement = pdfViewerRef.current.querySelector(`[data-page-number="${pageNumber}"]`);
       if (pageElement) {
-        pageElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        pageElement.scrollIntoView({
+          behavior: 'smooth',
+          block: 'start',
+          inline: 'nearest'
+        });
       }
     }
   };
@@ -166,7 +170,6 @@ function App() {
                   <Page
                     key={`page_${index + 1}`}
                     pageNumber={index + 1}
-                    width={400}
                     renderTextLayer={false}
                     renderAnnotationLayer={false}
                     data-page-number={index + 1}
