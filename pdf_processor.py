@@ -14,6 +14,7 @@ import re
 from pathlib import Path
 import tabula
 import camelot
+import openpyxl
 
 
 @click.command()
@@ -364,6 +365,153 @@ def extract_table_to_excel(pdf_path, output_path, method):
             continue
     
     click.echo("❌ All table extraction methods failed")
+    return None
+
+
+def extract_all_statements_to_excel(pdf_path, output_path, pdf_name):
+    """
+    Extract all financial statements from the PDF and save to Excel with multiple tabs.
+    Returns the path to the Excel file.
+    """
+    excel_path = output_path / f"{pdf_name}_extracted.xlsx"
+    
+    # Define the statements to look for
+    statements = [
+        "CONSOLIDATED STATEMENTS OF INCOME",
+        "CONSOLIDATED STATEMENTS OF STOCKHOLDERS' EQUITY", 
+        "CONSOLIDATED STATEMENTS OF CASH FLOWS"
+    ]
+    
+    # Create Excel writer
+    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+        extracted_count = 0
+        
+        for statement in statements:
+            click.echo(f"\n🔍 Looking for: {statement}")
+            
+            # Find the page with this statement
+            target_page = find_page_with_text(pdf_path, statement, 3)
+            
+            if target_page is None:
+                click.echo(f"❌ No page found with text '{statement}'")
+                continue
+            
+            click.echo(f"✅ Found {statement} on page {target_page}")
+            
+            # Extract the page
+            extracted_pdf_path = extract_page(pdf_path, target_page, output_path)
+            if extracted_pdf_path is None:
+                click.echo(f"❌ Failed to extract page {target_page}")
+                continue
+            
+            # Extract table from the page
+            table_df = extract_table_from_page(extracted_pdf_path, statement)
+            if table_df is not None and not table_df.empty:
+                # Create tab name from statement
+                tab_name = statement.replace("CONSOLIDATED STATEMENTS OF ", "").replace("'", "").replace(" ", "_")
+                tab_name = tab_name[:31]  # Excel tab names limited to 31 characters
+                
+                # Write to Excel tab
+                table_df.to_excel(writer, sheet_name=tab_name, index=False)
+                
+                # Add comment to cell A1 with source information
+                worksheet = writer.sheets[tab_name]
+                cell_a1 = worksheet['A1']
+                comment_text = f"From page {target_page} of {pdf_path.name}"
+                cell_a1.comment = openpyxl.comments.Comment(comment_text, "PDF Processor")
+                
+                click.echo(f"✅ Added {statement} to tab '{tab_name}' with source comment")
+                extracted_count += 1
+            else:
+                click.echo(f"❌ No table found for {statement}")
+        
+        if extracted_count == 0:
+            click.echo("❌ No statements were successfully extracted")
+            return None
+        
+        click.echo(f"\n🎉 Successfully extracted {extracted_count} statements to {excel_path}")
+        return excel_path
+
+
+def extract_table_from_page(pdf_path, statement_name):
+    """
+    Extract table from a specific page and return as DataFrame.
+    """
+    # First, try to extract header information
+    header_years = extract_header_info(pdf_path)
+    if header_years:
+        click.echo(f"📅 Found year headers: {header_years}")
+    else:
+        click.echo("⚠️  No year headers found, using default column names")
+    
+    # Try different extraction methods
+    methods_to_try = ['pdfplumber', 'camelot', 'tabula']
+    
+    for current_method in methods_to_try:
+        try:
+            click.echo(f"Trying table extraction with {current_method}...")
+            
+            if current_method == 'tabula':
+                tables = tabula.read_pdf(str(pdf_path), pages='all')
+                if tables:
+                    combined_df = pd.concat(tables, ignore_index=True)
+                    processed_df = process_table_data(combined_df)
+                    if header_years and len(header_years) >= len(processed_df.columns) - 1:
+                        new_columns = ['Description'] + header_years[:len(processed_df.columns) - 1]
+                        processed_df.columns = new_columns
+                    return processed_df
+                    
+            elif current_method == 'camelot':
+                try:
+                    tables = camelot.read_pdf(str(pdf_path), pages='all')
+                    if tables:
+                        dfs = []
+                        for table in tables:
+                            df = table.df
+                            df = df.replace('', pd.NA).dropna(how='all')
+                            dfs.append(df)
+                        
+                        if dfs:
+                            combined_df = pd.concat(dfs, ignore_index=True)
+                            processed_df = process_table_data(combined_df)
+                            if header_years and len(header_years) >= len(processed_df.columns) - 1:
+                                new_columns = ['Description'] + header_years[:len(processed_df.columns) - 1]
+                                processed_df.columns = new_columns
+                            return processed_df
+                except Exception as e:
+                    if "Ghostscript is not installed" in str(e):
+                        click.echo("⚠️  Ghostscript not found for camelot, trying next method...")
+                        continue
+                    else:
+                        raise e
+                        
+            elif current_method == 'pdfplumber':
+                with pdfplumber.open(pdf_path) as pdf:
+                    all_tables = []
+                    for page in pdf.pages:
+                        tables = page.extract_tables()
+                        if tables:
+                            for table in tables:
+                                if table and len(table) > 1:
+                                    df = pd.DataFrame(table[1:], columns=table[0])
+                                    # Ensure unique column names
+                                    if df.columns.duplicated().any():
+                                        df.columns = [f"{col}_{i}" if df.columns.duplicated()[i] else col for i, col in enumerate(df.columns)]
+                                    df = df.replace('', pd.NA).dropna(how='all')
+                                    all_tables.append(df)
+                    
+                    if all_tables:
+                        combined_df = pd.concat(all_tables, ignore_index=True)
+                        processed_df = process_table_data(combined_df)
+                        if header_years and len(header_years) >= len(processed_df.columns) - 1:
+                            new_columns = ['Description'] + header_years[:len(processed_df.columns) - 1]
+                            processed_df.columns = new_columns
+                        return processed_df
+        
+        except Exception as e:
+            click.echo(f"❌ Error with {current_method}: {e}")
+            continue
+    
     return None
 
 
