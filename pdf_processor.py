@@ -66,7 +66,7 @@ def process_pdf(pdf_path, search_text, min_page, output_dir, method):
 def find_page_with_text(pdf_path, search_text, min_page):
     """
     Find the first page containing the specified text, starting from min_page,
-    but NOT containing the excluded text.
+    but NOT containing the excluded text, and has less than 350 words.
     Returns the page number (1-indexed) or None if not found.
     """
     try:
@@ -79,6 +79,14 @@ def find_page_with_text(pdf_path, search_text, min_page):
                 text = page.extract_text()
                 if not text:
                     continue
+                
+                # Count words on the page
+                word_count = len(text.split())
+                
+                # Only consider pages with less than 350 words
+                if word_count >= 350:
+                    continue
+                
                 upper_text = text.upper()
                 # Exclude if there are two or more mentions of 'TABLE OF CONTENTS' or any mention of 'INDEX'
                 if (upper_text.count('TABLE OF CONTENTS') >= 2 or 'INDEX' in upper_text):
