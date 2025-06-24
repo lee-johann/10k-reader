@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.util.List;
 
 @RestController
 @RequestMapping("/api/pdf")
@@ -16,6 +17,24 @@ public class PdfController {
 
     @Autowired
     private PdfProcessingService pdfProcessingService;
+
+    @GetMapping("/documents")
+    public ResponseEntity<List<String>> getAvailablePdfs() {
+        List<String> pdfs = pdfProcessingService.getAvailablePdfs();
+        return ResponseEntity.ok(pdfs);
+    }
+
+    @PostMapping("/process-document")
+    public ResponseEntity<ProcessingResult> processDocument(@RequestParam("filename") String filename) {
+        try {
+            ProcessingResult result = pdfProcessingService.processPdfFromDocuments(filename);
+            return ResponseEntity.ok(result);
+        } catch (IOException e) {
+            return ResponseEntity.badRequest().build();
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError().build();
+        }
+    }
 
     @PostMapping("/upload")
     public ResponseEntity<ProcessingResult> uploadAndProcessPdf(@RequestParam("file") MultipartFile file) {

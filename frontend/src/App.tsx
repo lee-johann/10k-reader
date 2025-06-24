@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
@@ -15,66 +15,73 @@ interface StatementData {
 }
 
 interface ProcessingResult {
-  pdfUrl: string;
+  pdfUrl?: string;
   statements: StatementData[];
   message: string;
   success: boolean;
 }
 
 function App() {
-  const [file, setFile] = useState<File | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
+  const [availablePdfs, setAvailablePdfs] = useState<string[]>([]);
+  const [selectedPdf, setSelectedPdf] = useState<string>('');
+  const [isProcessing, setIsProcessing] = useState(false);
   const [result, setResult] = useState<ProcessingResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState(0);
+  const [activeTab, setActiveTab] = useState<string>('');
   const [currentPage, setCurrentPage] = useState(1);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [numPages, setNumPages] = useState<number | null>(null);
+  const pdfViewerRef = useRef<HTMLDivElement>(null);
 
-  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = event.target.files?.[0];
-    if (selectedFile && selectedFile.type === 'application/pdf') {
-      setFile(selectedFile);
-      setError(null);
-    } else {
-      setError('Please select a valid PDF file');
+  // Load available PDFs on component mount
+  useEffect(() => {
+    loadAvailablePdfs();
+  }, []);
+
+  // Set initial active tab when result is loaded
+  useEffect(() => {
+    if (result && result.success && result.statements.length > 0) {
+      setActiveTab(result.statements[0].name);
+    }
+  }, [result]);
+
+  // Log extracted PDF and page numbers to console
+  useEffect(() => {
+    if (result && result.success && result.statements.length > 0) {
+      console.log('Extracted PDF:', selectedPdf);
+      result.statements.forEach(statement => {
+        console.log(`Statement: ${statement.name}, Page: ${statement.pageNumber}`);
+      });
+    }
+  }, [result, selectedPdf]);
+
+  const loadAvailablePdfs = async () => {
+    try {
+      const response = await axios.get<string[]>('/api/pdf/documents');
+      setAvailablePdfs(response.data);
+    } catch (err) {
+      console.error('Failed to load PDFs:', err);
+      setError('Failed to load available PDFs');
     }
   };
 
-  const handleDragOver = (event: React.DragEvent) => {
-    event.preventDefault();
-    event.currentTarget.classList.add('dragover');
+  const handlePdfSelect = (event: React.ChangeEvent<HTMLSelectElement>) => {
+    setSelectedPdf(event.target.value);
+    setError(null);
+    setResult(null);
   };
 
-  const handleDragLeave = (event: React.DragEvent) => {
-    event.preventDefault();
-    event.currentTarget.classList.remove('dragover');
-  };
+  const handleProcess = async () => {
+    if (!selectedPdf) return;
 
-  const handleDrop = (event: React.DragEvent) => {
-    event.preventDefault();
-    event.currentTarget.classList.remove('dragover');
-
-    const droppedFile = event.dataTransfer.files[0];
-    if (droppedFile && droppedFile.type === 'application/pdf') {
-      setFile(droppedFile);
-      setError(null);
-    } else {
-      setError('Please drop a valid PDF file');
-    }
-  };
-
-  const handleUpload = async () => {
-    if (!file) return;
-
-    setIsUploading(true);
+    setIsProcessing(true);
     setError(null);
     setResult(null);
 
-    const formData = new FormData();
-    formData.append('file', file);
-
     try {
-      const response = await axios.post<ProcessingResult>('/api/pdf/upload', formData, {
+      const formData = new FormData();
+      formData.append('filename', selectedPdf);
+
+      const response = await axios.post<ProcessingResult>('/api/pdf/process-document', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
@@ -89,22 +96,24 @@ function App() {
         setError(response.data.message || 'Processing failed');
       }
     } catch (err) {
-      setError('Failed to upload and process PDF');
-      console.error('Upload error:', err);
+      setError('Failed to process PDF');
+      console.error('Processing error:', err);
     } finally {
-      setIsUploading(false);
+      setIsProcessing(false);
     }
   };
 
-  const handleTabClick = (index: number) => {
-    setActiveTab(index);
-    if (result && result.statements[index]) {
-      setCurrentPage(result.statements[index].pageNumber);
-    }
-  };
+  const handleTabClick = (statementName: string, pageNumber: number) => {
+    setActiveTab(statementName);
+    setCurrentPage(pageNumber);
 
-  const triggerFileInput = () => {
-    fileInputRef.current?.click();
+    // Scroll to the specific page in the PDF
+    if (pdfViewerRef.current && numPages) {
+      const pageElement = pdfViewerRef.current.querySelector(`[data-page-number="${pageNumber}"]`);
+      if (pageElement) {
+        pageElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }
   };
 
   return (
@@ -112,90 +121,105 @@ function App() {
       <div className="container">
         <div className="upload-section">
           <h1>PDF Financial Statement Processor</h1>
-          <p>Upload a PDF to extract financial statements and view them as tables</p>
+          <p>Select a PDF from the documents folder to extract financial statements</p>
 
-          <div
-            className="upload-area"
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            onClick={triggerFileInput}
-          >
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".pdf"
-              onChange={handleFileSelect}
-              style={{ display: 'none' }}
-            />
-            {file ? (
-              <div>
-                <p>Selected file: {file.name}</p>
-                <button
-                  className="upload-button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleUpload();
-                  }}
-                  disabled={isUploading}
-                >
-                  {isUploading ? 'Processing...' : 'Process PDF'}
-                </button>
-              </div>
-            ) : (
-              <div>
-                <p>Click to select a PDF file or drag and drop here</p>
-                <p>Supported format: PDF</p>
-              </div>
+          <div className="document-selector">
+            <label htmlFor="pdf-select">Choose a PDF document:</label>
+            <select
+              id="pdf-select"
+              value={selectedPdf}
+              onChange={handlePdfSelect}
+              disabled={isProcessing}
+            >
+              <option value="">-- Select a PDF --</option>
+              {availablePdfs.map((pdf, index) => (
+                <option key={index} value={pdf}>
+                  {pdf}
+                </option>
+              ))}
+            </select>
+
+            {selectedPdf && (
+              <button
+                className="process-button"
+                onClick={handleProcess}
+                disabled={isProcessing}
+              >
+                {isProcessing ? 'Processing...' : 'Process PDF'}
+              </button>
             )}
           </div>
 
           {error && <div className="error">{error}</div>}
-          {isUploading && <div className="loading">Processing PDF... This may take a few moments.</div>}
+          {isProcessing && <div className="loading">Processing PDF... This may take a few moments.</div>}
         </div>
 
         {result && result.success && (
           <div className="results-section">
-            <div className="pdf-viewer">
-              <h3>PDF Viewer (Page {currentPage})</h3>
-              <Document file={`http://localhost:8080${result.pdfUrl}`}>
-                <Page pageNumber={currentPage} width={400} />
+            <div className="pdf-viewer" ref={pdfViewerRef}>
+              <h3>PDF Viewer</h3>
+              <Document
+                file={`/documents/${selectedPdf}`}
+                onLoadSuccess={({ numPages }) => setNumPages(numPages)}
+              >
+                {numPages && Array.from(new Array(numPages), (el, index) => (
+                  <Page
+                    key={`page_${index + 1}`}
+                    pageNumber={index + 1}
+                    width={400}
+                    renderTextLayer={false}
+                    renderAnnotationLayer={false}
+                    data-page-number={index + 1}
+                  />
+                ))}
               </Document>
             </div>
 
-            <div className="table-viewer">
+            <div className="tables-section">
+              <h3>Extracted Tables</h3>
               <div className="tabs">
                 {result.statements.map((statement, index) => (
                   <button
-                    key={index}
-                    className={`tab ${activeTab === index ? 'active' : ''}`}
-                    onClick={() => handleTabClick(index)}
+                    key={statement.name}
+                    className={`tab ${activeTab === statement.name ? 'active' : ''}`}
+                    onClick={() => handleTabClick(statement.name, statement.pageNumber)}
                   >
                     {statement.name} (Page {statement.pageNumber})
                   </button>
                 ))}
               </div>
-
-              <div className="table-container">
-                {result.statements[activeTab] && (
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        {result.statements[activeTab].headers.map((header, index) => (
-                          <th key={index}>{header}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {result.statements[activeTab].tableData.map((row, rowIndex) => (
-                        <tr key={rowIndex}>
-                          {result.statements[activeTab].headers.map((header, colIndex) => (
-                            <td key={colIndex}>{row[header] || ''}</td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
+              <div className="table-content">
+                {result.statements.length > 0 && (
+                  <div>
+                    {(() => {
+                      const activeStatement = result.statements.find(s => s.name === activeTab) || result.statements[0];
+                      return (
+                        <div>
+                          <h4>{activeStatement.name} (Page {activeStatement.pageNumber})</h4>
+                          <div className="table-container">
+                            <table>
+                              <thead>
+                                <tr>
+                                  {activeStatement.headers.map((header: string, index: number) => (
+                                    <th key={index}>{header}</th>
+                                  ))}
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {activeStatement.tableData.map((row: { [key: string]: string }, rowIndex: number) => (
+                                  <tr key={rowIndex}>
+                                    {activeStatement.headers.map((header: string, colIndex: number) => (
+                                      <td key={colIndex}>{row[header] || ''}</td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
                 )}
               </div>
             </div>

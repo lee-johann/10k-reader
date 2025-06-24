@@ -11,6 +11,7 @@ import pandas as pd
 import os
 import sys
 import re
+import json
 from pathlib import Path
 import tabula
 import camelot
@@ -525,5 +526,133 @@ def extract_table_from_page(pdf_path, statement_name):
     return None
 
 
+def extract_all_statements_to_json(pdf_path, output_path, pdf_name):
+    """
+    Extract all financial statements from the PDF and return as JSON data.
+    Also creates Excel file locally for reference.
+    Returns JSON string with extracted statements.
+    """
+    # Convert output_path to Path object if it's a string
+    output_path = Path(output_path)
+    excel_path = output_path / f"{pdf_name}_extracted.xlsx"
+    
+    # Define the statements to look for
+    statements = [
+        "CONSOLIDATED STATEMENTS OF INCOME",
+        "CONSOLIDATED BALANCE SHEETS", 
+        "CONSOLIDATED STATEMENTS OF CASH FLOWS"
+    ]
+    
+    extracted_statements = []
+    
+    # Create Excel writer for local file
+    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+        for statement in statements:
+            click.echo(f"\n🔍 Looking for: {statement}")
+            
+            # Find the page with this statement
+            target_page = find_page_with_text(pdf_path, statement, 3)
+            
+            if target_page is None:
+                click.echo(f"❌ No page found with text '{statement}'")
+                continue
+            
+            click.echo(f"✅ Found {statement} on page {target_page}")
+            
+            # Extract the page
+            extracted_pdf_path = extract_page(pdf_path, target_page, output_path)
+            if extracted_pdf_path is None:
+                click.echo(f"❌ Failed to extract page {target_page}")
+                continue
+            
+            # Extract table from the page
+            table_df = extract_table_from_page(extracted_pdf_path, statement)
+            if table_df is not None and not table_df.empty:
+                # Create statement name from statement
+                statement_name = statement.replace("CONSOLIDATED STATEMENTS OF ", "").replace("CONSOLIDATED ", "").replace("'", "").replace(" ", "_")
+                
+                # Convert DataFrame to JSON-serializable format
+                statement_data = {
+                    "name": statement_name,
+                    "pageNumber": target_page,
+                    "headers": table_df.columns.tolist(),
+                    "tableData": []
+                }
+                
+                # Convert DataFrame rows to list of dictionaries
+                for _, row in table_df.iterrows():
+                    row_dict = {}
+                    for col in table_df.columns:
+                        value = row[col]
+                        if pd.isna(value):
+                            row_dict[col] = ""
+                        else:
+                            row_dict[col] = str(value)
+                    statement_data["tableData"].append(row_dict)
+                
+                extracted_statements.append(statement_data)
+                
+                # Also write to Excel for local reference
+                tab_name = statement.replace("CONSOLIDATED STATEMENTS OF ", "").replace("'", "").replace(" ", "_")
+                tab_name = tab_name[:31]  # Excel tab names limited to 31 characters
+                
+                # Write to Excel tab
+                table_df.to_excel(writer, sheet_name=tab_name, index=False)
+                
+                # Add comment to cell A1 with source information
+                worksheet = writer.sheets[tab_name]
+                cell_a1 = worksheet['A1']
+                comment_text = f"From page {target_page} of {Path(pdf_path).name}"
+                cell_a1.comment = openpyxl.comments.Comment(comment_text, "PDF Processor")
+                
+                click.echo(f"✅ Extracted {statement} from page {target_page}")
+                click.echo(f"📊 Added to Excel tab '{tab_name}' with source comment")
+            else:
+                click.echo(f"❌ No table found for {statement}")
+    
+    if not extracted_statements:
+        click.echo("❌ No statements were successfully extracted")
+        return None
+    
+    # Return JSON string
+    result = {
+        "pdfName": pdf_name,
+        "statements": extracted_statements,
+        "extractedCount": len(extracted_statements),
+        "excelPath": str(excel_path)
+    }
+    
+    click.echo(f"\n🎉 Successfully extracted {len(extracted_statements)} statements")
+    click.echo(f"📁 Excel file created locally: {excel_path}")
+    return json.dumps(result)
+
+
 if __name__ == '__main__':
-    process_pdf() 
+    import sys
+    
+    # Check if called with arguments (from Java backend)
+    if len(sys.argv) == 4:
+        pdf_path = sys.argv[1]
+        output_path = sys.argv[2]
+        pdf_name = sys.argv[3]
+        
+        # Redirect click.echo to stderr so it doesn't interfere with JSON output
+        import click
+        original_echo = click.echo
+        
+        def stderr_echo(message):
+            print(message, file=sys.stderr)
+        
+        click.echo = stderr_echo
+        
+        # Call the JSON function directly
+        result = extract_all_statements_to_json(pdf_path, output_path, pdf_name)
+        if result:
+            print(result)  # Print JSON to stdout for Java to capture
+            sys.exit(0)
+        else:
+            print("Failed to extract statements", file=sys.stderr)
+            sys.exit(1)
+    else:
+        # Use Click interface for CLI
+        process_pdf() 
