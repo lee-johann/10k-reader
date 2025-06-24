@@ -33,10 +33,7 @@ public class PdfProcessingService {
         try {
             // Run Python script to extract all statements
             ProcessBuilder processBuilder = new ProcessBuilder(
-                "python3", "-c", 
-                "import sys; sys.path.append('.'); from pdf_processor import extract_all_statements_to_excel; " +
-                "extract_all_statements_to_excel('" + uploadPath.toString() + "', '" + OUTPUT_DIR + "', '" + 
-                originalFilename.replace(".pdf", "") + "')"
+                "python3", "pdf_processor.py", uploadPath.toString(), OUTPUT_DIR, originalFilename.replace(".pdf", "")
             );
             processBuilder.directory(new File(".."));
             processBuilder.redirectErrorStream(true);
