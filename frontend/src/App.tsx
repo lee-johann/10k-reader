@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
@@ -22,59 +22,47 @@ interface ProcessingResult {
 }
 
 function App() {
-  const [file, setFile] = useState<File | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
+  const [availablePdfs, setAvailablePdfs] = useState<string[]>([]);
+  const [selectedPdf, setSelectedPdf] = useState<string>('');
+  const [isProcessing, setIsProcessing] = useState(false);
   const [result, setResult] = useState<ProcessingResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = event.target.files?.[0];
-    if (selectedFile && selectedFile.type === 'application/pdf') {
-      setFile(selectedFile);
-      setError(null);
-    } else {
-      setError('Please select a valid PDF file');
+  // Load available PDFs on component mount
+  useEffect(() => {
+    loadAvailablePdfs();
+  }, []);
+
+  const loadAvailablePdfs = async () => {
+    try {
+      const response = await axios.get<string[]>('/api/pdf/documents');
+      setAvailablePdfs(response.data);
+    } catch (err) {
+      console.error('Failed to load PDFs:', err);
+      setError('Failed to load available PDFs');
     }
   };
 
-  const handleDragOver = (event: React.DragEvent) => {
-    event.preventDefault();
-    event.currentTarget.classList.add('dragover');
+  const handlePdfSelect = (event: React.ChangeEvent<HTMLSelectElement>) => {
+    setSelectedPdf(event.target.value);
+    setError(null);
+    setResult(null);
   };
 
-  const handleDragLeave = (event: React.DragEvent) => {
-    event.preventDefault();
-    event.currentTarget.classList.remove('dragover');
-  };
+  const handleProcess = async () => {
+    if (!selectedPdf) return;
 
-  const handleDrop = (event: React.DragEvent) => {
-    event.preventDefault();
-    event.currentTarget.classList.remove('dragover');
-
-    const droppedFile = event.dataTransfer.files[0];
-    if (droppedFile && droppedFile.type === 'application/pdf') {
-      setFile(droppedFile);
-      setError(null);
-    } else {
-      setError('Please drop a valid PDF file');
-    }
-  };
-
-  const handleUpload = async () => {
-    if (!file) return;
-
-    setIsUploading(true);
+    setIsProcessing(true);
     setError(null);
     setResult(null);
 
-    const formData = new FormData();
-    formData.append('file', file);
-
     try {
-      const response = await axios.post<ProcessingResult>('/api/pdf/upload', formData, {
+      const formData = new FormData();
+      formData.append('filename', selectedPdf);
+
+      const response = await axios.post<ProcessingResult>('/api/pdf/process-document', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
@@ -89,10 +77,10 @@ function App() {
         setError(response.data.message || 'Processing failed');
       }
     } catch (err) {
-      setError('Failed to upload and process PDF');
-      console.error('Upload error:', err);
+      setError('Failed to process PDF');
+      console.error('Processing error:', err);
     } finally {
-      setIsUploading(false);
+      setIsProcessing(false);
     }
   };
 
@@ -103,55 +91,42 @@ function App() {
     }
   };
 
-  const triggerFileInput = () => {
-    fileInputRef.current?.click();
-  };
-
   return (
     <div className="app">
       <div className="container">
         <div className="upload-section">
           <h1>PDF Financial Statement Processor</h1>
-          <p>Upload a PDF to extract financial statements and view them as tables</p>
+          <p>Select a PDF from the documents folder to extract financial statements</p>
 
-          <div
-            className="upload-area"
-            onDragOver={handleDragOver}
-            onDragLeave={handleDragLeave}
-            onDrop={handleDrop}
-            onClick={triggerFileInput}
-          >
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".pdf"
-              onChange={handleFileSelect}
-              style={{ display: 'none' }}
-            />
-            {file ? (
-              <div>
-                <p>Selected file: {file.name}</p>
-                <button
-                  className="upload-button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleUpload();
-                  }}
-                  disabled={isUploading}
-                >
-                  {isUploading ? 'Processing...' : 'Process PDF'}
-                </button>
-              </div>
-            ) : (
-              <div>
-                <p>Click to select a PDF file or drag and drop here</p>
-                <p>Supported format: PDF</p>
-              </div>
+          <div className="document-selector">
+            <label htmlFor="pdf-select">Choose a PDF document:</label>
+            <select
+              id="pdf-select"
+              value={selectedPdf}
+              onChange={handlePdfSelect}
+              disabled={isProcessing}
+            >
+              <option value="">-- Select a PDF --</option>
+              {availablePdfs.map((pdf, index) => (
+                <option key={index} value={pdf}>
+                  {pdf}
+                </option>
+              ))}
+            </select>
+
+            {selectedPdf && (
+              <button
+                className="process-button"
+                onClick={handleProcess}
+                disabled={isProcessing}
+              >
+                {isProcessing ? 'Processing...' : 'Process PDF'}
+              </button>
             )}
           </div>
 
           {error && <div className="error">{error}</div>}
-          {isUploading && <div className="loading">Processing PDF... This may take a few moments.</div>}
+          {isProcessing && <div className="loading">Processing PDF... This may take a few moments.</div>}
         </div>
 
         {result && result.success && (

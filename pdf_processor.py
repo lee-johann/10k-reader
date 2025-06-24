@@ -526,4 +526,22 @@ def extract_table_from_page(pdf_path, statement_name):
 
 
 if __name__ == '__main__':
-    process_pdf() 
+    import sys
+    
+    # Check if called with arguments (from Java backend)
+    if len(sys.argv) == 4:
+        pdf_path = sys.argv[1]
+        output_path = sys.argv[2]
+        pdf_name = sys.argv[3]
+        
+        # Call the function directly
+        result = extract_all_statements_to_excel(pdf_path, output_path, pdf_name)
+        if result:
+            print(f"Success: {result}")
+            sys.exit(0)
+        else:
+            print("Failed to extract statements")
+            sys.exit(1)
+    else:
+        # Use Click interface for CLI
+        process_pdf() 

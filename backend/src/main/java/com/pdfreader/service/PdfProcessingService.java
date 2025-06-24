@@ -16,10 +16,77 @@ import java.util.stream.Collectors;
 @Service
 public class PdfProcessingService {
 
-    private static final String UPLOAD_DIR = "uploads";
+    private static final String DOCUMENTS_DIR = "../documents";
     private static final String OUTPUT_DIR = "output";
-    private static final String PYTHON_SCRIPT = "../pdf_processor.py";
 
+    public List<String> getAvailablePdfs() {
+        List<String> pdfFiles = new ArrayList<>();
+        try {
+            File documentsDir = new File(DOCUMENTS_DIR);
+            if (documentsDir.exists() && documentsDir.isDirectory()) {
+                File[] files = documentsDir.listFiles((dir, name) -> name.toLowerCase().endsWith(".pdf"));
+                if (files != null) {
+                    for (File file : files) {
+                        pdfFiles.add(file.getName());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            // Log error but return empty list
+            System.err.println("Error reading documents directory: " + e.getMessage());
+        }
+        return pdfFiles;
+    }
+
+    public ProcessingResult processPdfFromDocuments(String filename) throws IOException {
+        // Create output directory if it doesn't exist
+        createDirectories();
+
+        // Check if file exists in documents folder
+        Path pdfPath = Paths.get(DOCUMENTS_DIR, filename);
+        if (!Files.exists(pdfPath)) {
+            return new ProcessingResult(null, null, "PDF file not found: " + filename, false);
+        }
+
+        try {
+            // Run Python script to extract all statements
+            ProcessBuilder processBuilder = new ProcessBuilder(
+                "python3", "pdf_processor.py", "documents/" + filename, OUTPUT_DIR, filename.replace(".pdf", "")
+            );
+            processBuilder.directory(new File(".."));
+            processBuilder.redirectErrorStream(true);
+            
+            Process process = processBuilder.start();
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            
+            StringBuilder output = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append("\n");
+            }
+            
+            int exitCode = process.waitFor();
+            
+            if (exitCode != 0) {
+                return new ProcessingResult(null, null, "Python script failed: " + output.toString(), false);
+            }
+
+            // Parse Excel file
+            List<ProcessingResult.StatementData> statements = parseExcelFile();
+            
+            return new ProcessingResult(
+                "/documents/" + filename,
+                statements,
+                "Processing completed successfully",
+                true
+            );
+
+        } catch (Exception e) {
+            return new ProcessingResult(null, null, "Error processing PDF: " + e.getMessage(), false);
+        }
+    }
+
+    // Keep the old method for backward compatibility
     public ProcessingResult processPdf(MultipartFile file) throws IOException {
         // Create directories if they don't exist
         createDirectories();
@@ -27,7 +94,8 @@ public class PdfProcessingService {
         // Save uploaded file
         String originalFilename = file.getOriginalFilename();
         String savedFilename = System.currentTimeMillis() + "_" + originalFilename;
-        Path uploadPath = Paths.get(UPLOAD_DIR, savedFilename);
+        Path uploadPath = Paths.get("uploads", savedFilename);
+        Files.createDirectories(Paths.get("uploads"));
         Files.copy(file.getInputStream(), uploadPath);
 
         try {
@@ -69,7 +137,6 @@ public class PdfProcessingService {
     }
 
     private void createDirectories() throws IOException {
-        Files.createDirectories(Paths.get(UPLOAD_DIR));
         Files.createDirectories(Paths.get(OUTPUT_DIR));
     }
 

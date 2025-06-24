@@ -21,6 +21,11 @@ dist/
 *.swp
 *.swo
 *~
+*.iml
+*.ipr
+*.iws
+*.sublime-project
+*.sublime-workspace
 
 # OS generated files
 .DS_Store
@@ -118,10 +123,9 @@ pip-delete-this-directory.txt
 *.tar.gz
 *.rar
 hs_err_pid*
-target/
-!target/*.jar
 
 # Maven
+target/
 .mvn/timing.properties
 .mvn/wrapper/maven-wrapper.jar
 
@@ -138,19 +142,5 @@ test_output/
 *.pdf
 !documents/*.pdf
 
-# IDE
-*.iml
-*.ipr
-*.iws
-.idea/
-*.sublime-project
-*.sublime-workspace
-
-# OS
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db 
+# Keep the main JAR for deployment (optional - remove if you don't want to track it)
+!backend/target/pdf-processor-backend-1.0.0.jar 
