@@ -5,6 +5,8 @@ import org.apache.poi.ss.usermodel.*;
 import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
 
 import java.io.*;
 import java.nio.file.Files;
@@ -18,6 +20,7 @@ public class PdfProcessingService {
 
     private static final String DOCUMENTS_DIR = "../documents";
     private static final String OUTPUT_DIR = "output";
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public List<String> getAvailablePdfs() {
         List<String> pdfFiles = new ArrayList<>();
@@ -54,25 +57,35 @@ public class PdfProcessingService {
                 "python3", "pdf_processor.py", "documents/" + filename, OUTPUT_DIR, filename.replace(".pdf", "")
             );
             processBuilder.directory(new File(".."));
-            processBuilder.redirectErrorStream(true);
             
             Process process = processBuilder.start();
-            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
             
-            StringBuilder output = new StringBuilder();
+            // Capture stdout (JSON) and stderr (log messages) separately
+            BufferedReader stdoutReader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            BufferedReader stderrReader = new BufferedReader(new InputStreamReader(process.getErrorStream()));
+            
+            StringBuilder jsonOutput = new StringBuilder();
+            StringBuilder logOutput = new StringBuilder();
+            
+            // Read stdout (JSON data)
             String line;
-            while ((line = reader.readLine()) != null) {
-                output.append(line).append("\n");
+            while ((line = stdoutReader.readLine()) != null) {
+                jsonOutput.append(line).append("\n");
+            }
+            
+            // Read stderr (log messages) - just for logging, not for parsing
+            while ((line = stderrReader.readLine()) != null) {
+                logOutput.append(line).append("\n");
             }
             
             int exitCode = process.waitFor();
             
             if (exitCode != 0) {
-                return new ProcessingResult(null, null, "Python script failed: " + output.toString(), false);
+                return new ProcessingResult(null, null, "Python script failed: " + logOutput.toString(), false);
             }
 
-            // Parse Excel file
-            List<ProcessingResult.StatementData> statements = parseExcelFile();
+            // Parse JSON response from Python script (stdout only)
+            List<ProcessingResult.StatementData> statements = parseJsonFromOutput(jsonOutput.toString());
             
             return new ProcessingResult(
                 null,
@@ -104,25 +117,35 @@ public class PdfProcessingService {
                 "python3", "pdf_processor.py", uploadPath.toString(), OUTPUT_DIR, originalFilename.replace(".pdf", "")
             );
             processBuilder.directory(new File(".."));
-            processBuilder.redirectErrorStream(true);
             
             Process process = processBuilder.start();
-            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
             
-            StringBuilder output = new StringBuilder();
+            // Capture stdout (JSON) and stderr (log messages) separately
+            BufferedReader stdoutReader = new BufferedReader(new InputStreamReader(process.getInputStream()));
+            BufferedReader stderrReader = new BufferedReader(new InputStreamReader(process.getErrorStream()));
+            
+            StringBuilder jsonOutput = new StringBuilder();
+            StringBuilder logOutput = new StringBuilder();
+            
+            // Read stdout (JSON data)
             String line;
-            while ((line = reader.readLine()) != null) {
-                output.append(line).append("\n");
+            while ((line = stdoutReader.readLine()) != null) {
+                jsonOutput.append(line).append("\n");
+            }
+            
+            // Read stderr (log messages) - just for logging, not for parsing
+            while ((line = stderrReader.readLine()) != null) {
+                logOutput.append(line).append("\n");
             }
             
             int exitCode = process.waitFor();
             
             if (exitCode != 0) {
-                return new ProcessingResult(null, null, "Python script failed: " + output.toString(), false);
+                return new ProcessingResult(null, null, "Python script failed: " + logOutput.toString(), false);
             }
 
-            // Parse Excel file
-            List<ProcessingResult.StatementData> statements = parseExcelFile();
+            // Parse JSON response from Python script (stdout only)
+            List<ProcessingResult.StatementData> statements = parseJsonFromOutput(jsonOutput.toString());
             
             return new ProcessingResult(
                 "/uploads/" + savedFilename,
@@ -140,99 +163,45 @@ public class PdfProcessingService {
         Files.createDirectories(Paths.get(OUTPUT_DIR));
     }
 
-    private List<ProcessingResult.StatementData> parseExcelFile() throws IOException {
+    private List<ProcessingResult.StatementData> parseJsonFromOutput(String jsonOutput) throws IOException {
         List<ProcessingResult.StatementData> statements = new ArrayList<>();
         
-        // Look for Excel files in output directory
-        File outputDir = new File(OUTPUT_DIR);
-        File[] excelFiles = outputDir.listFiles((dir, name) -> name.endsWith(".xlsx"));
-        
-        if (excelFiles == null || excelFiles.length == 0) {
-            return statements;
-        }
-
-        // Use the first Excel file found
-        try (FileInputStream fis = new FileInputStream(excelFiles[0]);
-             Workbook workbook = new XSSFWorkbook(fis)) {
-
-            for (int i = 0; i < workbook.getNumberOfSheets(); i++) {
-                Sheet sheet = workbook.getSheetAt(i);
-                String sheetName = sheet.getSheetName();
-                
-                // Extract page number from sheet name or comments
-                int pageNumber = extractPageNumber(sheet);
-                
-                List<String> headers = new ArrayList<>();
-                List<Map<String, String>> tableData = new ArrayList<>();
-                
-                // Read headers from first row
-                Row headerRow = sheet.getRow(0);
-                if (headerRow != null) {
-                    for (Cell cell : headerRow) {
-                        headers.add(getCellValueAsString(cell));
-                    }
-                }
-                
-                // Read data rows
-                for (int rowIndex = 1; rowIndex <= sheet.getLastRowNum(); rowIndex++) {
-                    Row row = sheet.getRow(rowIndex);
-                    if (row != null) {
-                        Map<String, String> rowData = new HashMap<>();
-                        for (int colIndex = 0; colIndex < headers.size(); colIndex++) {
-                            Cell cell = row.getCell(colIndex);
-                            rowData.put(headers.get(colIndex), getCellValueAsString(cell));
+        try {
+            // Parse the JSON response
+            Map<String, Object> jsonResponse = objectMapper.readValue(jsonOutput, new TypeReference<Map<String, Object>>() {});
+            
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> statementsList = (List<Map<String, Object>>) jsonResponse.get("statements");
+            
+            if (statementsList != null) {
+                for (Map<String, Object> statementData : statementsList) {
+                    String name = (String) statementData.get("name");
+                    Integer pageNumber = (Integer) statementData.get("pageNumber");
+                    
+                    @SuppressWarnings("unchecked")
+                    List<String> headers = (List<String>) statementData.get("headers");
+                    
+                    @SuppressWarnings("unchecked")
+                    List<Map<String, Object>> tableDataList = (List<Map<String, Object>>) statementData.get("tableData");
+                    
+                    List<Map<String, String>> tableData = new ArrayList<>();
+                    if (tableDataList != null) {
+                        for (Map<String, Object> row : tableDataList) {
+                            Map<String, String> stringRow = new HashMap<>();
+                            for (Map.Entry<String, Object> entry : row.entrySet()) {
+                                stringRow.put(entry.getKey(), entry.getValue() != null ? entry.getValue().toString() : "");
+                            }
+                            tableData.add(stringRow);
                         }
-                        tableData.add(rowData);
                     }
+                    
+                    statements.add(new ProcessingResult.StatementData(name, pageNumber, tableData, headers));
                 }
-                
-                statements.add(new ProcessingResult.StatementData(sheetName, pageNumber, tableData, headers));
             }
+        } catch (Exception e) {
+            throw new IOException("Failed to parse JSON response: " + e.getMessage(), e);
         }
         
         return statements;
-    }
-
-    private int extractPageNumber(Sheet sheet) {
-        // Try to extract page number from sheet comments or name
-        String sheetName = sheet.getSheetName();
-        
-        // Look for page number in sheet name
-        if (sheetName.contains("Page")) {
-            String[] parts = sheetName.split("Page");
-            if (parts.length > 1) {
-                try {
-                    return Integer.parseInt(parts[1].trim());
-                } catch (NumberFormatException e) {
-                    // Ignore and continue
-                }
-            }
-        }
-        
-        // Default to 1 if no page number found
-        return 1;
-    }
-
-    private String getCellValueAsString(Cell cell) {
-        if (cell == null) {
-            return "";
-        }
-        
-        switch (cell.getCellType()) {
-            case STRING:
-                return cell.getStringCellValue();
-            case NUMERIC:
-                if (DateUtil.isCellDateFormatted(cell)) {
-                    return cell.getDateCellValue().toString();
-                } else {
-                    return String.valueOf(cell.getNumericCellValue());
-                }
-            case BOOLEAN:
-                return String.valueOf(cell.getBooleanCellValue());
-            case FORMULA:
-                return cell.getCellFormula();
-            default:
-                return "";
-        }
     }
 } 
