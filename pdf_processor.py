@@ -16,6 +16,7 @@ from pathlib import Path
 import tabula
 import camelot
 import openpyxl
+import functools
 
 
 @click.command()
@@ -28,7 +29,8 @@ import openpyxl
               help='Output directory for extracted files')
 @click.option('--method', type=click.Choice(['tabula', 'camelot', 'pdfplumber']), 
               default='camelot', help='Table extraction method')
-def process_pdf(pdf_path, search_text, min_page, output_dir, method):
+@click.option('--debug', is_flag=True, default=False, help='Enable debug logging')
+def process_pdf(pdf_path, search_text, min_page, output_dir, method, debug):
     """
     Process a PDF file to find specific pages and extract tables.
     
@@ -56,7 +58,7 @@ def process_pdf(pdf_path, search_text, min_page, output_dir, method):
     click.echo(f"✅ Extracted page to: {extracted_pdf_path}")
     
     # Step 3: Extract table from the page
-    excel_path = extract_table_to_excel(extracted_pdf_path, output_path, method)
+    excel_path = extract_table_to_excel(extracted_pdf_path, output_path, method, debug)
     click.echo(f"✅ Table extracted to Excel: {excel_path}")
     
     click.echo(f"\n🎉 Processing complete!")
@@ -127,7 +129,7 @@ def extract_page(pdf_path, page_number, output_path):
         return None
 
 
-def process_table_data(df):
+def process_table_data(df, debug=False):
     """
     Process the extracted table data to separate text from numbers and clean up formatting.
     Expects format like: "Sales and marketing $26,567 $27,917 $27,808"
@@ -135,48 +137,55 @@ def process_table_data(df):
     """
     if df.empty:
         return df
-    
+
+    if debug:
+        print('RAW DF:')
+        print(df)
+    first_col = str(df.columns[0])
+    if 'Revenues' in first_col:
+        header_row = [first_col] + [str(col) for col in df.columns[1:]]
+        if debug:
+            print(f'HEADER AS ROW: {header_row}')
+        df.loc[-1] = header_row
+        df.index = df.index + 1
+        df = df.sort_index()
+        df.columns = [f'col_{i}' for i in range(len(df.columns))]
+
     processed_rows = []
-    
+
     for index, row in df.iterrows():
-        # Convert row to string and process each cell
-        row_str = ' '.join(str(cell) for cell in row if pd.notna(cell) and str(cell).strip())
+        # Remove trailing None/empty/None_2 columns
+        cells = [str(cell) for cell in row if pd.notna(cell) and str(cell).strip()]
+        while cells and (cells[-1] == 'None' or cells[-1] == 'None_2' or cells[-1] == ''):
+            cells.pop()
+        row_str = ' '.join(cells)
+        if debug:
+            print(f'RAW ROW: {repr(row_str)}')
         if not row_str.strip():
             continue
-        # Strip dollar signs and clean up
         row_str = row_str.replace('$', '').strip()
         parts = row_str.split()
         if len(parts) < 2:
+            if debug:
+                print(f'SKIPPED (too few parts): {repr(row_str)}')
             continue
-        # Traverse from the end, collecting numbers or bracketed negatives
         number_parts = []
         i = len(parts) - 1
         while i >= 0:
             part = parts[i]
-            
-            # Check if this is a number according to our rules
             is_number = False
             is_bracketed_number = False
-            
-            # Rule 1: Immediately surrounded by brackets (like (3514))
             if part.startswith('(') and part.endswith(')') and len(part) > 2:
                 bracket_content = part[1:-1]
                 if re.match(r'^[\d,]+$', bracket_content):
-                    # Check if there's a space before the opening bracket in original string
                     idx = row_str.find(part)
                     if idx == 0 or row_str[idx - 1] == ' ':
                         is_bracketed_number = True
                         is_number = True
-            
-            # Rule 2: No brackets at all (like 3514)
             elif not '(' in part and not ')' in part:
                 clean_part = part.replace(',', '')
                 if re.match(r'^-?[\d]+\.?[\d]*$', clean_part):
                     is_number = True
-            
-            # Rule 3: Starts with dollar sign (like $3514) - already handled by stripping $ above
-            # This is covered by Rule 2 since we strip $ signs earlier
-            
             if is_number:
                 if is_bracketed_number:
                     number_str = bracket_content.replace(',', '')
@@ -186,12 +195,14 @@ def process_table_data(df):
                 i -= 1
             else:
                 break
-        # Everything before the numbers is the description
         text_parts = parts[:i+1]
-        if text_parts and number_parts:
-            text_column = ' '.join(text_parts)
-            processed_row = [text_column] + number_parts
-            processed_rows.append(processed_row)
+        if not text_parts or not number_parts:
+            if debug:
+                print(f'SKIPPED (no text or numbers): {repr(row_str)}')
+            continue
+        text_column = ' '.join(text_parts)
+        processed_row = [text_column] + number_parts
+        processed_rows.append(processed_row)
     if not processed_rows:
         return df
     max_cols = max(len(row) for row in processed_rows)
@@ -252,7 +263,7 @@ def extract_header_info(pdf_path):
         return None
 
 
-def extract_table_to_excel(pdf_path, output_path, method):
+def extract_table_to_excel(pdf_path, output_path, method, debug=False):
     """
     Extract tables from the PDF and save to Excel.
     Returns the path to the Excel file.
@@ -285,7 +296,7 @@ def extract_table_to_excel(pdf_path, output_path, method):
                     # Combine all tables into one DataFrame
                     combined_df = pd.concat(tables, ignore_index=True)
                     # Process the table data
-                    processed_df = process_table_data(combined_df)
+                    processed_df = process_table_data(combined_df, debug)
                     
                     # Update column names if we found year headers
                     if header_years and len(header_years) >= len(processed_df.columns) - 1:
@@ -315,7 +326,7 @@ def extract_table_to_excel(pdf_path, output_path, method):
                         if dfs:
                             combined_df = pd.concat(dfs, ignore_index=True)
                             # Process the table data
-                            processed_df = process_table_data(combined_df)
+                            processed_df = process_table_data(combined_df, debug)
                             
                             # Update column names if we found year headers
                             if header_years and len(header_years) >= len(processed_df.columns) - 1:
@@ -356,7 +367,7 @@ def extract_table_to_excel(pdf_path, output_path, method):
                     if all_tables:
                         combined_df = pd.concat(all_tables, ignore_index=True)
                         # Process the table data
-                        processed_df = process_table_data(combined_df)
+                        processed_df = process_table_data(combined_df, debug)
                         
                         # Update column names if we found year headers
                         if header_years and len(header_years) >= len(processed_df.columns) - 1:
