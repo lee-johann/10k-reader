@@ -84,6 +84,23 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hoveredValue, hoveredPage]);
 
+  // Update PDF highlight when multi-cell selection changes (e.g., after shift-click)
+  useEffect(() => {
+    if (
+      selectedCells.size > 1 &&
+      showFloatingPage &&
+      floatingPageNumber &&
+      activeTab &&
+      anchorCell
+    ) {
+      const newToken = hoverTokenRef.current + 1;
+      hoverTokenRef.current = newToken;
+      setHoverToken(newToken);
+      showFloatingPageOverlay(hoveredValue, floatingPageNumber, newToken);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCells, anchorCell]);
+
   // Function to remove all highlights
   const removeHighlights = (element: Element) => {
     element.querySelectorAll('.highlighted').forEach(el => {
@@ -99,6 +116,23 @@ function App() {
     });
   };
 
+  // Helper to get all selected cell values for a given page
+  const getSelectedValuesForPage = (statementName: string, pageNumber: number) => {
+    if (!result || !result.statements) return [];
+    const statement = result.statements.find(s => s.name === statementName && s.pageNumber === pageNumber);
+    if (!statement) return [];
+    const values: string[] = [];
+    statement.tableData.forEach((row, rowIdx) => {
+      statement.headers.forEach((header, colIdx) => {
+        const key = getCellKey(statementName, rowIdx, colIdx);
+        if (selectedCells.has(key)) {
+          values.push(row[header] || '');
+        }
+      });
+    });
+    return values;
+  };
+
   // Show floating page overlay (now takes hoverToken)
   const showFloatingPageOverlay = async (value: string, pageNumber: number, token: number) => {
     try {
@@ -109,7 +143,17 @@ function App() {
       setFloatingPageNumber(pageNumber);
       setShowFloatingPage(true);
       setTimeout(() => {
-        highlightInFloatingPage(value, pageNumber, token);
+        let values: string[] = [];
+        if (selectedCells.size > 0 && activeTab) {
+          values = getSelectedValuesForPage(activeTab, pageNumber);
+        }
+        // Always add hovered value if not already in the list
+        if (value && !values.includes(value)) {
+          values.push(value);
+        }
+        // Remove empty strings
+        values = values.filter(v => v !== '');
+        highlightInFloatingPage(values, pageNumber, token);
       }, 100);
     } catch (error) {
       console.error('Error showing floating page overlay:', error);
@@ -126,17 +170,17 @@ function App() {
     return { width: view[2], height: view[3] };
   };
 
-  // Highlight in the floating page (now takes hoverToken)
-  const highlightInFloatingPage = async (value: string, pageNumber: number, token: number) => {
+  // Highlight in the floating page (now takes an array of values)
+  const highlightInFloatingPage = async (values: string[], pageNumber: number, token: number) => {
     if (token !== hoverTokenRef.current) return;
     try {
       if (!floatingPageRef.current) return;
       removeHighlights(floatingPageRef.current);
       const textItems = await extractTextWithCoordinates(`/documents/${selectedPdf}`, pageNumber);
-      const normalizedValue = normalizeNumber(value);
+      const normalizedValues = values.map(normalizeNumber).filter(v => v !== '');
       const matchingItems = textItems.filter(item => {
         const normalizedText = normalizeNumber(item.text);
-        return shouldHighlight(normalizedValue, normalizedText, value, item.text);
+        return normalizedValues.some(nv => shouldHighlight(nv, normalizedText, '', item.text));
       });
       const canvasElement = floatingPageRef.current.querySelector('canvas');
       if (!canvasElement) return;
@@ -398,8 +442,9 @@ function App() {
   // Handler for right-click (context menu) on a cell
   const handleCellRightClick = (e: React.MouseEvent, statementName: string, rowIdx: number, colIdx: number) => {
     e.preventDefault();
-    if (selectedCells.size > 1) {
-      // If all selected cells are already green, unmark them; otherwise, mark them
+    const key = getCellKey(statementName, rowIdx, colIdx);
+    if (selectedCells.size > 1 && selectedCells.has(key)) {
+      // If right-clicking a cell within the selection, mark/unmark the whole selection
       setMarkedCells(prev => {
         const newSet = new Set(prev);
         const allSelectedGreen = Array.from(selectedCells).every(k => newSet.has(k));
@@ -412,8 +457,7 @@ function App() {
       });
       setSelectedCells(new Set());
     } else {
-      // Toggle just this cell
-      const key = getCellKey(statementName, rowIdx, colIdx);
+      // Otherwise, just toggle this cell
       setMarkedCells(prev => {
         const newSet = new Set(prev);
         if (newSet.has(key)) {
@@ -423,6 +467,7 @@ function App() {
         }
         return newSet;
       });
+      setSelectedCells(new Set());
     }
   };
 
