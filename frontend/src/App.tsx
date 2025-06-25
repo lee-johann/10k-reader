@@ -42,6 +42,8 @@ function App() {
   const [currentCell, setCurrentCell] = useState<{ row: number, col: number } | null>(null);
   const [isSelecting, setIsSelecting] = useState(false);
   const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
+  const [hoverToken, setHoverToken] = useState(0);
+  const hoverTokenRef = useRef(0);
 
   // Load available PDFs on component mount
   useEffect(() => {
@@ -68,14 +70,18 @@ function App() {
   // Effect to highlight text in PDF when hovering over table cells
   useEffect(() => {
     if (hoveredValue && hoveredPage && pdfViewerRef.current) {
-      console.log('Hovering over:', hoveredValue, 'on page:', hoveredPage);
-
-      // Show floating page overlay instead of highlighting in scrollable PDF
-      showFloatingPageOverlay(hoveredValue, hoveredPage);
+      hoverTokenRef.current += 1;
+      const newToken = hoverTokenRef.current;
+      setHoverToken(newToken);
+      showFloatingPageOverlay(hoveredValue, hoveredPage, newToken);
     } else if (!hoveredValue) {
-      // Hide floating page when not hovering
-      hideFloatingPageOverlay();
+      if (pdfViewerRef.current) {
+        removeHighlights(pdfViewerRef.current);
+      }
+      setShowFloatingPage(false);
+      setFloatingPageNumber(null);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hoveredValue, hoveredPage]);
 
   // Function to remove all highlights
@@ -93,31 +99,21 @@ function App() {
     });
   };
 
-  // Show floating page overlay
-  const showFloatingPageOverlay = async (value: string, pageNumber: number) => {
+  // Show floating page overlay (now takes hoverToken)
+  const showFloatingPageOverlay = async (value: string, pageNumber: number, token: number) => {
     try {
-      // Find the target page element in the scrollable PDF
       const pageElement = pdfViewerRef.current?.querySelector(`[data-page-number="${pageNumber}"]`);
-      if (!pageElement) {
-        console.log('Page element not found for page:', pageNumber);
-        return;
-      }
+      if (!pageElement) return;
       const rect = pageElement.getBoundingClientRect();
       setFloatingPagePosition({ x: rect.left, y: rect.top, width: rect.width, height: rect.height });
       setFloatingPageNumber(pageNumber);
       setShowFloatingPage(true);
       setTimeout(() => {
-        highlightInFloatingPage(value, pageNumber);
+        highlightInFloatingPage(value, pageNumber, token);
       }, 100);
     } catch (error) {
       console.error('Error showing floating page overlay:', error);
     }
-  };
-
-  // Hide floating page overlay
-  const hideFloatingPageOverlay = () => {
-    setShowFloatingPage(false);
-    setFloatingPageNumber(null);
   };
 
   // Helper to get PDF page viewBox (width, height) from PDF.js
@@ -130,76 +126,29 @@ function App() {
     return { width: view[2], height: view[3] };
   };
 
-  // Highlight in the floating page
-  const highlightInFloatingPage = async (value: string, pageNumber: number) => {
+  // Highlight in the floating page (now takes hoverToken)
+  const highlightInFloatingPage = async (value: string, pageNumber: number, token: number) => {
+    if (token !== hoverTokenRef.current) return;
     try {
-      if (!floatingPageRef.current) {
-        console.log('Floating page ref not found');
-        return;
-      }
+      if (!floatingPageRef.current) return;
       removeHighlights(floatingPageRef.current);
       const textItems = await extractTextWithCoordinates(`/documents/${selectedPdf}`, pageNumber);
       const normalizedValue = normalizeNumber(value);
-      // Debug: Log all text items
-      console.log('All text items on page:', textItems.map(t => `${t.text} @ (${t.x}, ${t.y})`));
       const matchingItems = textItems.filter(item => {
         const normalizedText = normalizeNumber(item.text);
         return shouldHighlight(normalizedValue, normalizedText, value, item.text);
       });
-      matchingItems.forEach((item, index) => {
-        console.log(`Matched: "${item.text}" at (${item.x}, ${item.y})`);
-      });
       const canvasElement = floatingPageRef.current.querySelector('canvas');
-      if (!canvasElement) {
-        console.log('Canvas element not found in floating page');
-        return;
-      }
+      if (!canvasElement) return;
       const canvasContainer = canvasElement.closest('.react-pdf__Page__canvas-container') || canvasElement.parentElement;
-      if (!canvasContainer) {
-        console.log('Canvas container not found in floating page');
-        return;
-      }
+      if (!canvasContainer) return;
       const canvasWidth = canvasElement.width;
       const canvasHeight = canvasElement.height;
       const displayWidth = canvasElement.offsetWidth;
       const displayHeight = canvasElement.offsetHeight;
-      // Get PDF page viewBox
       const { width: pdfWidth, height: pdfHeight } = await getPdfPageViewBox(`/documents/${selectedPdf}`, pageNumber);
-      console.log(`Canvas: ${canvasWidth}x${canvasHeight}, Display: ${displayWidth}x${displayHeight}, PDF viewBox: ${pdfWidth}x${pdfHeight}`);
-      // Use PDF viewBox for scaling
       const scaleX = displayWidth / pdfWidth;
       const scaleY = displayHeight / pdfHeight;
-      console.log(`scaleX: ${scaleX}, scaleY: ${scaleY}`);
-      // Debug mode: Draw boxes around all numbers
-      if (debugMode) {
-        textItems.forEach((item, index) => {
-          if (/[-+]?\d[\d,\.]*$/.test(item.text)) {
-            const [a, b, c, d, e, f] = item.transform;
-            const x = e;
-            const y = f;
-            const width = a * item.width; // a is scale in X
-            const height = Math.abs(d);   // d is scale in Y (may be negative)
-            // Map PDF coordinates to display coordinates
-            const displayX = x * scaleX;
-            // Flip Y and account for text height
-            const displayY = displayHeight - ((y + height) * scaleY);
-            console.log(`DEBUG BOX: "${item.text}" PDF: (${x}, ${y}, ${width}, ${height}) -> Display: (${displayX}, ${displayY})`);
-            const box = document.createElement('div');
-            box.className = 'debug-number-box';
-            box.style.position = 'absolute';
-            box.style.left = `${displayX - 2}px`;
-            box.style.top = `${displayY - 2}px`;
-            box.style.width = `${width * scaleX + 4}px`;
-            box.style.height = `${height * scaleY + 4}px`;
-            box.style.border = '2px dashed #00f';
-            box.style.backgroundColor = 'rgba(0,0,255,0.05)';
-            box.style.pointerEvents = 'none';
-            box.title = `Extracted: ${item.text}`;
-            canvasContainer.appendChild(box);
-          }
-        });
-      }
-      // Create yellow highlight overlays for each matching item
       matchingItems.forEach((item, index) => {
         const [a, b, c, d, e, f] = item.transform;
         const x = e;
@@ -208,7 +157,6 @@ function App() {
         const height = Math.abs(d);
         const displayX = x * scaleX;
         const displayY = displayHeight - ((y + height) * scaleY);
-        console.log(`YELLOW BOX: "${item.text}" PDF: (${x}, ${y}, ${width}, ${height}) -> Display: (${displayX}, ${displayY})`);
         const highlight = document.createElement('div');
         highlight.className = 'yellow-highlight-overlay';
         highlight.style.position = 'absolute';
