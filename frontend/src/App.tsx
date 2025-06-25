@@ -144,7 +144,8 @@ function App() {
       setShowFloatingPage(true);
       setTimeout(() => {
         let values: string[] = [];
-        if (selectedCells.size > 0 && activeTab) {
+        // Only use selectedCells if multi-cell selection is active
+        if (selectedCells.size > 1 && activeTab) {
           values = getSelectedValuesForPage(activeTab, pageNumber);
         }
         // Always add hovered value if not already in the list
@@ -153,6 +154,7 @@ function App() {
         }
         // Remove empty strings
         values = values.filter(v => v !== '');
+        console.log('[DEBUG] Values to highlight in PDF:', values);
         highlightInFloatingPage(values, pageNumber, token);
       }, 100);
     } catch (error) {
@@ -178,10 +180,15 @@ function App() {
       removeHighlights(floatingPageRef.current);
       const textItems = await extractTextWithCoordinates(`/documents/${selectedPdf}`, pageNumber);
       const normalizedValues = values.map(normalizeNumber).filter(v => v !== '');
+      console.log('[DEBUG] All extracted text items for page', pageNumber, ':');
+      textItems.forEach((item, idx) => {
+        console.log(`  [${idx}] text: "${item.text}", normalized: "${normalizeNumber(item.text)}"`);
+      });
       const matchingItems = textItems.filter(item => {
         const normalizedText = normalizeNumber(item.text);
         return normalizedValues.some(nv => shouldHighlight(nv, normalizedText, '', item.text));
       });
+      console.log('[DEBUG] Highlighting items:', matchingItems.map(i => i.text));
       const canvasElement = floatingPageRef.current.querySelector('canvas');
       if (!canvasElement) return;
       const canvasContainer = canvasElement.closest('.react-pdf__Page__canvas-container') || canvasElement.parentElement;
@@ -201,12 +208,27 @@ function App() {
         const height = Math.abs(d);
         const displayX = x * scaleX;
         const displayY = displayHeight - ((y + height) * scaleY);
+        // Estimate highlight width using font size and a character width ratio
+        const fontSize = Math.abs(d); // d is usually the font size, may be negative
+        const charWidthRatio = 0.5; // Adjust this value as needed for best fit
+        const matchedValue = values.find(v => normalizeNumber(v) === normalizeNumber(item.text)) || item.text;
+        const valueLength = matchedValue.length;
+        const highlightWidth = fontSize * charWidthRatio * valueLength * scaleX;
+        const highlightLeft = displayX - 2;
+        console.log('[DEBUG] Creating highlight overlay:', {
+          text: item.text,
+          left: highlightLeft,
+          top: displayY - 2,
+          width: highlightWidth + 4,
+          height: height * scaleY + 4
+        });
+        // If the highlight visually covers too much, adjust the calculation above
         const highlight = document.createElement('div');
         highlight.className = 'yellow-highlight-overlay';
         highlight.style.position = 'absolute';
-        highlight.style.left = `${displayX - 2}px`;
+        highlight.style.left = `${highlightLeft}px`;
         highlight.style.top = `${displayY - 2}px`;
-        highlight.style.width = `${width * scaleX + 4}px`;
+        highlight.style.width = `${highlightWidth + 4}px`;
         highlight.style.height = `${height * scaleY + 4}px`;
         highlight.style.backgroundColor = 'rgba(255, 255, 0, 0.5)';
         highlight.style.borderRadius = '4px';
@@ -354,8 +376,15 @@ function App() {
   };
 
   const handleTableCellHover = (value: string, pageNumber: number) => {
+    console.log('[DEBUG] Hovered cell value:', value, 'Page:', pageNumber);
     setHoveredValue(value);
     setHoveredPage(pageNumber);
+
+    // If not multi-selecting, clear selectedCells so only hovered cell is considered
+    if (!isSelecting && selectedCells.size <= 1) {
+      setSelectedCells(new Set());
+    }
+    console.log('[DEBUG] selectedCells after hover:', Array.from(selectedCells));
 
     // Scroll to the specific page in the PDF
     if (pdfViewerRef.current && numPages) {
@@ -632,4 +661,4 @@ function App() {
   );
 }
 
-export default App; 
+export default App;
