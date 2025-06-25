@@ -38,6 +38,10 @@ function App() {
   const floatingPageRef = useRef<HTMLDivElement>(null);
   const [debugMode, setDebugMode] = useState(false);
   const [markedCells, setMarkedCells] = useState<Set<string>>(new Set());
+  const [anchorCell, setAnchorCell] = useState<{ row: number, col: number } | null>(null);
+  const [currentCell, setCurrentCell] = useState<{ row: number, col: number } | null>(null);
+  const [isSelecting, setIsSelecting] = useState(false);
+  const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
 
   // Load available PDFs on component mount
   useEffect(() => {
@@ -400,19 +404,90 @@ function App() {
   // Helper to generate a unique key for a cell
   const getCellKey = (statementName: string, rowIdx: number, colIdx: number) => `${statementName}|${rowIdx}|${colIdx}`;
 
+  // Helper to get all cell keys in a rectangle
+  const getCellRangeKeys = (statementName: string, start: { row: number, col: number }, end: { row: number, col: number }) => {
+    const keys: string[] = [];
+    const rowMin = Math.min(start.row, end.row);
+    const rowMax = Math.max(start.row, end.row);
+    const colMin = Math.min(start.col, end.col);
+    const colMax = Math.max(start.col, end.col);
+    for (let r = rowMin; r <= rowMax; r++) {
+      for (let c = colMin; c <= colMax; c++) {
+        keys.push(getCellKey(statementName, r, c));
+      }
+    }
+    return keys;
+  };
+
+  // Handler for mouse down (start selection or shift-click selection)
+  const handleCellMouseDown = (e: React.MouseEvent, statementName: string, rowIdx: number, colIdx: number) => {
+    if (e.button !== 0) return; // Only left click
+    if (e.shiftKey && anchorCell) {
+      // Shift-click: select rectangle from anchor to this cell
+      const keys = getCellRangeKeys(statementName, anchorCell, { row: rowIdx, col: colIdx });
+      setSelectedCells(new Set(keys));
+      // Do NOT update anchorCell here
+    } else {
+      // Normal click: set anchor and select just this cell
+      setAnchorCell({ row: rowIdx, col: colIdx });
+      setCurrentCell({ row: rowIdx, col: colIdx });
+      setIsSelecting(true);
+      setSelectedCells(new Set([getCellKey(statementName, rowIdx, colIdx)]));
+    }
+  };
+
+  // Handler for mouse over (drag selection)
+  const handleCellMouseOver = (e: React.MouseEvent, statementName: string, rowIdx: number, colIdx: number) => {
+    if (!isSelecting || !anchorCell) return;
+    setCurrentCell({ row: rowIdx, col: colIdx });
+    const keys = getCellRangeKeys(statementName, anchorCell, { row: rowIdx, col: colIdx });
+    setSelectedCells(new Set(keys));
+  };
+
+  // Handler for mouse up (end selection)
+  const handleCellMouseUp = () => {
+    setIsSelecting(false);
+    setCurrentCell(null);
+    // Do NOT clear anchorCell here
+  };
+
+  // Add event listeners to handle mouse up outside the table
+  useEffect(() => {
+    if (isSelecting) {
+      window.addEventListener('mouseup', handleCellMouseUp);
+      return () => window.removeEventListener('mouseup', handleCellMouseUp);
+    }
+  }, [isSelecting]);
+
   // Handler for right-click (context menu) on a cell
   const handleCellRightClick = (e: React.MouseEvent, statementName: string, rowIdx: number, colIdx: number) => {
     e.preventDefault();
-    const key = getCellKey(statementName, rowIdx, colIdx);
-    setMarkedCells(prev => {
-      const newSet = new Set(prev);
-      if (newSet.has(key)) {
-        newSet.delete(key);
-      } else {
-        newSet.add(key);
-      }
-      return newSet;
-    });
+    if (selectedCells.size > 1) {
+      // If all selected cells are already green, unmark them; otherwise, mark them
+      setMarkedCells(prev => {
+        const newSet = new Set(prev);
+        const allSelectedGreen = Array.from(selectedCells).every(k => newSet.has(k));
+        if (allSelectedGreen) {
+          selectedCells.forEach(k => newSet.delete(k));
+        } else {
+          selectedCells.forEach(k => newSet.add(k));
+        }
+        return newSet;
+      });
+      setSelectedCells(new Set());
+    } else {
+      // Toggle just this cell
+      const key = getCellKey(statementName, rowIdx, colIdx);
+      setMarkedCells(prev => {
+        const newSet = new Set(prev);
+        if (newSet.has(key)) {
+          newSet.delete(key);
+        } else {
+          newSet.add(key);
+        }
+        return newSet;
+      });
+    }
   };
 
   return (
@@ -513,7 +588,12 @@ function App() {
                                           onMouseEnter={(e) => handleTableCellHover(row[header] || '', activeStatement.pageNumber)}
                                           onMouseLeave={handleTableCellLeave}
                                           onContextMenu={e => handleCellRightClick(e, activeStatement.name, rowIndex, colIndex)}
-                                          className={markedCells.has(getCellKey(activeStatement.name, rowIndex, colIndex)) ? 'green-marked-cell' : ''}
+                                          onMouseDown={e => handleCellMouseDown(e, activeStatement.name, rowIndex, colIndex)}
+                                          onMouseOver={e => handleCellMouseOver(e, activeStatement.name, rowIndex, colIndex)}
+                                          className={
+                                            (markedCells.has(getCellKey(activeStatement.name, rowIndex, colIndex)) ? 'green-marked-cell ' : '') +
+                                            (selectedCells.has(getCellKey(activeStatement.name, rowIndex, colIndex)) ? 'blue-selected-cell' : '')
+                                          }
                                           style={{ userSelect: 'none' }}
                                         >
                                           {row[header] || ''}

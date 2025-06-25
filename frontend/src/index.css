@@ -505,3 +505,8 @@ code {
   background-color: #b2f2bb !important;
   transition: background-color 0.2s;
 }
+
+.blue-selected-cell {
+  background-color: #cce0ff !important;
+  transition: background-color 0.2s;
+}
