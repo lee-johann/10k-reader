@@ -514,6 +514,7 @@ function App() {
                                           onMouseLeave={handleTableCellLeave}
                                           onContextMenu={e => handleCellRightClick(e, activeStatement.name, rowIndex, colIndex)}
                                           className={markedCells.has(getCellKey(activeStatement.name, rowIndex, colIndex)) ? 'green-marked-cell' : ''}
+                                          style={{ userSelect: 'none' }}
                                         >
                                           {row[header] || ''}
                                         </td>
