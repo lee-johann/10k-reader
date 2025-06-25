@@ -500,3 +500,8 @@ code {
   pointer-events: none;
   z-index: 1001;
 }
+
+.green-marked-cell {
+  background-color: #b2f2bb !important;
+  transition: background-color 0.2s;
+}

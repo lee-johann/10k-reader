@@ -37,6 +37,7 @@ function App() {
   const pdfViewerRef = useRef<HTMLDivElement>(null);
   const floatingPageRef = useRef<HTMLDivElement>(null);
   const [debugMode, setDebugMode] = useState(false);
+  const [markedCells, setMarkedCells] = useState<Set<string>>(new Set());
 
   // Load available PDFs on component mount
   useEffect(() => {
@@ -396,6 +397,24 @@ function App() {
     setHoveredPage(null);
   };
 
+  // Helper to generate a unique key for a cell
+  const getCellKey = (statementName: string, rowIdx: number, colIdx: number) => `${statementName}|${rowIdx}|${colIdx}`;
+
+  // Handler for right-click (context menu) on a cell
+  const handleCellRightClick = (e: React.MouseEvent, statementName: string, rowIdx: number, colIdx: number) => {
+    e.preventDefault();
+    const key = getCellKey(statementName, rowIdx, colIdx);
+    setMarkedCells(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(key)) {
+        newSet.delete(key);
+      } else {
+        newSet.add(key);
+      }
+      return newSet;
+    });
+  };
+
   return (
     <div className="app">
       <div className="container">
@@ -493,6 +512,8 @@ function App() {
                                           key={colIndex}
                                           onMouseEnter={(e) => handleTableCellHover(row[header] || '', activeStatement.pageNumber)}
                                           onMouseLeave={handleTableCellLeave}
+                                          onContextMenu={e => handleCellRightClick(e, activeStatement.name, rowIndex, colIndex)}
+                                          className={markedCells.has(getCellKey(activeStatement.name, rowIndex, colIndex)) ? 'green-marked-cell' : ''}
                                         >
                                           {row[header] || ''}
                                         </td>
