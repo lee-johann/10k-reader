@@ -33,7 +33,7 @@ function App() {
   const [hoveredPage, setHoveredPage] = useState<number | null>(null);
   const [showFloatingPage, setShowFloatingPage] = useState(false);
   const [floatingPageNumber, setFloatingPageNumber] = useState<number | null>(null);
-  const [floatingPagePosition, setFloatingPagePosition] = useState({ x: 0, y: 0 });
+  const [floatingPagePosition, setFloatingPagePosition] = useState({ x: 0, y: 0, width: 0, height: 0 });
   const pdfViewerRef = useRef<HTMLDivElement>(null);
   const floatingPageRef = useRef<HTMLDivElement>(null);
   const [debugMode, setDebugMode] = useState(false);
@@ -96,31 +96,19 @@ function App() {
   // Show floating page overlay
   const showFloatingPageOverlay = async (value: string, pageNumber: number) => {
     try {
-      console.log('Showing floating page overlay for:', value, 'on page:', pageNumber);
-
-      // Get the PDF viewer's position in the viewport
-      const viewerRect = pdfViewerRef.current?.getBoundingClientRect();
-      if (!viewerRect) {
-        console.log('Viewer rect not found');
+      // Find the target page element in the scrollable PDF
+      const pageElement = pdfViewerRef.current?.querySelector(`[data-page-number="${pageNumber}"]`);
+      if (!pageElement) {
+        console.log('Page element not found for page:', pageNumber);
         return;
       }
-
-      // Calculate the position for the floating overlay
-      // Place it above the PDF viewer, centered horizontally
-      const overlayWidth = viewerRect.width;
-      const overlayHeight = viewerRect.height / (numPages || 1); // Estimate height as one page tall
-      const x = viewerRect.left;
-      const y = Math.max(viewerRect.top - overlayHeight - 16, 0); // 16px gap above
-
-      setFloatingPagePosition({ x, y });
+      const rect = pageElement.getBoundingClientRect();
+      setFloatingPagePosition({ x: rect.left, y: rect.top, width: rect.width, height: rect.height });
       setFloatingPageNumber(pageNumber);
       setShowFloatingPage(true);
-
-      // Wait for the floating page to render, then highlight
       setTimeout(() => {
         highlightInFloatingPage(value, pageNumber);
       }, 100);
-
     } catch (error) {
       console.error('Error showing floating page overlay:', error);
     }
@@ -623,9 +611,10 @@ function App() {
           ref={floatingPageRef}
           style={{
             position: 'fixed',
-            left: `${floatingPagePosition.x}px`,
-            top: `${floatingPagePosition.y}px`,
-            width: pdfViewerRef.current?.offsetWidth || 'auto',
+            left: floatingPagePosition.x,
+            top: floatingPagePosition.y,
+            width: floatingPagePosition.width,
+            height: floatingPagePosition.height,
             zIndex: 1000,
             pointerEvents: 'none',
             opacity: 0.97,
@@ -638,7 +627,7 @@ function App() {
           >
             <Page
               pageNumber={floatingPageNumber}
-              width={undefined}
+              width={floatingPagePosition.width}
               scale={1}
               renderTextLayer={false}
               renderAnnotationLayer={false}
