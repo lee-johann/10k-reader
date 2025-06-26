@@ -401,12 +401,15 @@ def extract_table_to_excel(pdf_path, output_path, method, debug=False):
                     all_tables = []
                     for page in pdf.pages:
                         tables = page.extract_tables()
+                        if debug:
+                            for t_idx, table in enumerate(tables):
+                                print(f"PDFPLUMBER DEBUG: TABLE {t_idx}")
+                                for row in table:
+                                    print(f"PDFPLUMBER DEBUG: ROW: {row}")
                         if tables:
                             for table in tables:
-                                # Convert table to DataFrame
-                                if table and len(table) > 1:  # Ensure we have headers and data
+                                if table and len(table) > 1:
                                     df = pd.DataFrame(table[1:], columns=table[0])
-                                    # Ensure unique column names
                                     if df.columns.duplicated().any():
                                         df.columns = [f"{col}_{i}" if df.columns.duplicated()[i] else col for i, col in enumerate(df.columns)]
                                     df = df.replace('', pd.NA).dropna(how='all')
@@ -527,6 +530,11 @@ def extract_table_from_page(pdf_path, statement_name, debug=False):
                     all_tables = []
                     for page in pdf.pages:
                         tables = page.extract_tables()
+                        if debug:
+                            for t_idx, table in enumerate(tables):
+                                print(f"PDFPLUMBER DEBUG: TABLE {t_idx}")
+                                for row in table:
+                                    print(f"PDFPLUMBER DEBUG: ROW: {row}")
                         if tables:
                             for table in tables:
                                 if table and len(table) > 1:
