@@ -33,10 +33,17 @@ function App() {
   const [hoveredPage, setHoveredPage] = useState<number | null>(null);
   const [showFloatingPage, setShowFloatingPage] = useState(false);
   const [floatingPageNumber, setFloatingPageNumber] = useState<number | null>(null);
-  const [floatingPagePosition, setFloatingPagePosition] = useState({ x: 0, y: 0 });
+  const [floatingPagePosition, setFloatingPagePosition] = useState({ x: 0, y: 0, width: 0, height: 0 });
   const pdfViewerRef = useRef<HTMLDivElement>(null);
   const floatingPageRef = useRef<HTMLDivElement>(null);
   const [debugMode, setDebugMode] = useState(false);
+  const [markedCells, setMarkedCells] = useState<Set<string>>(new Set());
+  const [anchorCell, setAnchorCell] = useState<{ row: number, col: number } | null>(null);
+  const [currentCell, setCurrentCell] = useState<{ row: number, col: number } | null>(null);
+  const [isSelecting, setIsSelecting] = useState(false);
+  const [selectedCells, setSelectedCells] = useState<Set<string>>(new Set());
+  const [hoverToken, setHoverToken] = useState(0);
+  const hoverTokenRef = useRef(0);
 
   // Load available PDFs on component mount
   useEffect(() => {
@@ -63,15 +70,36 @@ function App() {
   // Effect to highlight text in PDF when hovering over table cells
   useEffect(() => {
     if (hoveredValue && hoveredPage && pdfViewerRef.current) {
-      console.log('Hovering over:', hoveredValue, 'on page:', hoveredPage);
-
-      // Show floating page overlay instead of highlighting in scrollable PDF
-      showFloatingPageOverlay(hoveredValue, hoveredPage);
+      hoverTokenRef.current += 1;
+      const newToken = hoverTokenRef.current;
+      setHoverToken(newToken);
+      showFloatingPageOverlay(hoveredValue, hoveredPage, newToken);
     } else if (!hoveredValue) {
-      // Hide floating page when not hovering
-      hideFloatingPageOverlay();
+      if (pdfViewerRef.current) {
+        removeHighlights(pdfViewerRef.current);
+      }
+      setShowFloatingPage(false);
+      setFloatingPageNumber(null);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hoveredValue, hoveredPage]);
+
+  // Update PDF highlight when multi-cell selection changes (e.g., after shift-click)
+  useEffect(() => {
+    if (
+      selectedCells.size > 1 &&
+      showFloatingPage &&
+      floatingPageNumber &&
+      activeTab &&
+      anchorCell
+    ) {
+      const newToken = hoverTokenRef.current + 1;
+      hoverTokenRef.current = newToken;
+      setHoverToken(newToken);
+      showFloatingPageOverlay(hoveredValue, floatingPageNumber, newToken);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCells, anchorCell]);
 
   // Function to remove all highlights
   const removeHighlights = (element: Element) => {
@@ -88,43 +116,50 @@ function App() {
     });
   };
 
-  // Show floating page overlay
-  const showFloatingPageOverlay = async (value: string, pageNumber: number) => {
+  // Helper to get all selected cell values for a given page
+  const getSelectedValuesForPage = (statementName: string, pageNumber: number) => {
+    if (!result || !result.statements) return [];
+    const statement = result.statements.find(s => s.name === statementName && s.pageNumber === pageNumber);
+    if (!statement) return [];
+    const values: string[] = [];
+    statement.tableData.forEach((row, rowIdx) => {
+      statement.headers.forEach((header, colIdx) => {
+        const key = getCellKey(statementName, rowIdx, colIdx);
+        if (selectedCells.has(key)) {
+          values.push(row[header] || '');
+        }
+      });
+    });
+    return values;
+  };
+
+  // Show floating page overlay (now takes hoverToken)
+  const showFloatingPageOverlay = async (value: string, pageNumber: number, token: number) => {
     try {
-      console.log('Showing floating page overlay for:', value, 'on page:', pageNumber);
-
-      // Get the PDF viewer's position in the viewport
-      const viewerRect = pdfViewerRef.current?.getBoundingClientRect();
-      if (!viewerRect) {
-        console.log('Viewer rect not found');
-        return;
-      }
-
-      // Calculate the position for the floating overlay
-      // Place it above the PDF viewer, centered horizontally
-      const overlayWidth = viewerRect.width;
-      const overlayHeight = viewerRect.height / (numPages || 1); // Estimate height as one page tall
-      const x = viewerRect.left;
-      const y = Math.max(viewerRect.top - overlayHeight - 16, 0); // 16px gap above
-
-      setFloatingPagePosition({ x, y });
+      const pageElement = pdfViewerRef.current?.querySelector(`[data-page-number="${pageNumber}"]`);
+      if (!pageElement) return;
+      const rect = pageElement.getBoundingClientRect();
+      setFloatingPagePosition({ x: rect.left, y: rect.top, width: rect.width, height: rect.height });
       setFloatingPageNumber(pageNumber);
       setShowFloatingPage(true);
-
-      // Wait for the floating page to render, then highlight
       setTimeout(() => {
-        highlightInFloatingPage(value, pageNumber);
+        let values: string[] = [];
+        // Only use selectedCells if multi-cell selection is active
+        if (selectedCells.size > 1 && activeTab) {
+          values = getSelectedValuesForPage(activeTab, pageNumber);
+        }
+        // Always add hovered value if not already in the list
+        if (value && !values.includes(value)) {
+          values.push(value);
+        }
+        // Remove empty strings
+        values = values.filter(v => v !== '');
+        console.log('[DEBUG] Values to highlight in PDF:', values);
+        highlightInFloatingPage(values, pageNumber, token);
       }, 100);
-
     } catch (error) {
       console.error('Error showing floating page overlay:', error);
     }
-  };
-
-  // Hide floating page overlay
-  const hideFloatingPageOverlay = () => {
-    setShowFloatingPage(false);
-    setFloatingPageNumber(null);
   };
 
   // Helper to get PDF page viewBox (width, height) from PDF.js
@@ -137,76 +172,34 @@ function App() {
     return { width: view[2], height: view[3] };
   };
 
-  // Highlight in the floating page
-  const highlightInFloatingPage = async (value: string, pageNumber: number) => {
+  // Highlight in the floating page (now takes an array of values)
+  const highlightInFloatingPage = async (values: string[], pageNumber: number, token: number) => {
+    if (token !== hoverTokenRef.current) return;
     try {
-      if (!floatingPageRef.current) {
-        console.log('Floating page ref not found');
-        return;
-      }
+      if (!floatingPageRef.current) return;
       removeHighlights(floatingPageRef.current);
       const textItems = await extractTextWithCoordinates(`/documents/${selectedPdf}`, pageNumber);
-      const normalizedValue = normalizeNumber(value);
-      // Debug: Log all text items
-      console.log('All text items on page:', textItems.map(t => `${t.text} @ (${t.x}, ${t.y})`));
+      const normalizedValues = values.map(normalizeNumber).filter(v => v !== '');
+      console.log('[DEBUG] All extracted text items for page', pageNumber, ':');
+      textItems.forEach((item, idx) => {
+        console.log(`  [${idx}] text: "${item.text}", normalized: "${normalizeNumber(item.text)}"`);
+      });
       const matchingItems = textItems.filter(item => {
         const normalizedText = normalizeNumber(item.text);
-        return shouldHighlight(normalizedValue, normalizedText, value, item.text);
+        return normalizedValues.some(nv => shouldHighlight(nv, normalizedText, '', item.text));
       });
-      matchingItems.forEach((item, index) => {
-        console.log(`Matched: "${item.text}" at (${item.x}, ${item.y})`);
-      });
+      console.log('[DEBUG] Highlighting items:', matchingItems.map(i => i.text));
       const canvasElement = floatingPageRef.current.querySelector('canvas');
-      if (!canvasElement) {
-        console.log('Canvas element not found in floating page');
-        return;
-      }
+      if (!canvasElement) return;
       const canvasContainer = canvasElement.closest('.react-pdf__Page__canvas-container') || canvasElement.parentElement;
-      if (!canvasContainer) {
-        console.log('Canvas container not found in floating page');
-        return;
-      }
+      if (!canvasContainer) return;
       const canvasWidth = canvasElement.width;
       const canvasHeight = canvasElement.height;
       const displayWidth = canvasElement.offsetWidth;
       const displayHeight = canvasElement.offsetHeight;
-      // Get PDF page viewBox
       const { width: pdfWidth, height: pdfHeight } = await getPdfPageViewBox(`/documents/${selectedPdf}`, pageNumber);
-      console.log(`Canvas: ${canvasWidth}x${canvasHeight}, Display: ${displayWidth}x${displayHeight}, PDF viewBox: ${pdfWidth}x${pdfHeight}`);
-      // Use PDF viewBox for scaling
       const scaleX = displayWidth / pdfWidth;
       const scaleY = displayHeight / pdfHeight;
-      console.log(`scaleX: ${scaleX}, scaleY: ${scaleY}`);
-      // Debug mode: Draw boxes around all numbers
-      if (debugMode) {
-        textItems.forEach((item, index) => {
-          if (/[-+]?\d[\d,\.]*$/.test(item.text)) {
-            const [a, b, c, d, e, f] = item.transform;
-            const x = e;
-            const y = f;
-            const width = a * item.width; // a is scale in X
-            const height = Math.abs(d);   // d is scale in Y (may be negative)
-            // Map PDF coordinates to display coordinates
-            const displayX = x * scaleX;
-            // Flip Y and account for text height
-            const displayY = displayHeight - ((y + height) * scaleY);
-            console.log(`DEBUG BOX: "${item.text}" PDF: (${x}, ${y}, ${width}, ${height}) -> Display: (${displayX}, ${displayY})`);
-            const box = document.createElement('div');
-            box.className = 'debug-number-box';
-            box.style.position = 'absolute';
-            box.style.left = `${displayX - 2}px`;
-            box.style.top = `${displayY - 2}px`;
-            box.style.width = `${width * scaleX + 4}px`;
-            box.style.height = `${height * scaleY + 4}px`;
-            box.style.border = '2px dashed #00f';
-            box.style.backgroundColor = 'rgba(0,0,255,0.05)';
-            box.style.pointerEvents = 'none';
-            box.title = `Extracted: ${item.text}`;
-            canvasContainer.appendChild(box);
-          }
-        });
-      }
-      // Create yellow highlight overlays for each matching item
       matchingItems.forEach((item, index) => {
         const [a, b, c, d, e, f] = item.transform;
         const x = e;
@@ -215,13 +208,27 @@ function App() {
         const height = Math.abs(d);
         const displayX = x * scaleX;
         const displayY = displayHeight - ((y + height) * scaleY);
-        console.log(`YELLOW BOX: "${item.text}" PDF: (${x}, ${y}, ${width}, ${height}) -> Display: (${displayX}, ${displayY})`);
+        // Estimate highlight width using font size and a character width ratio
+        const fontSize = Math.abs(d); // d is usually the font size, may be negative
+        const charWidthRatio = 0.5; // Adjust this value as needed for best fit
+        const matchedValue = values.find(v => normalizeNumber(v) === normalizeNumber(item.text)) || item.text;
+        const valueLength = matchedValue.length;
+        const highlightWidth = fontSize * charWidthRatio * valueLength * scaleX;
+        const highlightLeft = displayX - 2;
+        console.log('[DEBUG] Creating highlight overlay:', {
+          text: item.text,
+          left: highlightLeft,
+          top: displayY - 2,
+          width: highlightWidth + 4,
+          height: height * scaleY + 4
+        });
+        // If the highlight visually covers too much, adjust the calculation above
         const highlight = document.createElement('div');
         highlight.className = 'yellow-highlight-overlay';
         highlight.style.position = 'absolute';
-        highlight.style.left = `${displayX - 2}px`;
+        highlight.style.left = `${highlightLeft}px`;
         highlight.style.top = `${displayY - 2}px`;
-        highlight.style.width = `${width * scaleX + 4}px`;
+        highlight.style.width = `${highlightWidth + 4}px`;
         highlight.style.height = `${height * scaleY + 4}px`;
         highlight.style.backgroundColor = 'rgba(255, 255, 0, 0.5)';
         highlight.style.borderRadius = '4px';
@@ -369,8 +376,15 @@ function App() {
   };
 
   const handleTableCellHover = (value: string, pageNumber: number) => {
+    console.log('[DEBUG] Hovered cell value:', value, 'Page:', pageNumber);
     setHoveredValue(value);
     setHoveredPage(pageNumber);
+
+    // If not multi-selecting, clear selectedCells so only hovered cell is considered
+    if (!isSelecting && selectedCells.size <= 1) {
+      setSelectedCells(new Set());
+    }
+    console.log('[DEBUG] selectedCells after hover:', Array.from(selectedCells));
 
     // Scroll to the specific page in the PDF
     if (pdfViewerRef.current && numPages) {
@@ -394,6 +408,96 @@ function App() {
   const handleTableCellLeave = () => {
     setHoveredValue('');
     setHoveredPage(null);
+  };
+
+  // Helper to generate a unique key for a cell
+  const getCellKey = (statementName: string, rowIdx: number, colIdx: number) => `${statementName}|${rowIdx}|${colIdx}`;
+
+  // Helper to get all cell keys in a rectangle
+  const getCellRangeKeys = (statementName: string, start: { row: number, col: number }, end: { row: number, col: number }) => {
+    const keys: string[] = [];
+    const rowMin = Math.min(start.row, end.row);
+    const rowMax = Math.max(start.row, end.row);
+    const colMin = Math.min(start.col, end.col);
+    const colMax = Math.max(start.col, end.col);
+    for (let r = rowMin; r <= rowMax; r++) {
+      for (let c = colMin; c <= colMax; c++) {
+        keys.push(getCellKey(statementName, r, c));
+      }
+    }
+    return keys;
+  };
+
+  // Handler for mouse down (start selection or shift-click selection)
+  const handleCellMouseDown = (e: React.MouseEvent, statementName: string, rowIdx: number, colIdx: number) => {
+    if (e.button !== 0) return; // Only left click
+    if (e.shiftKey && anchorCell) {
+      // Shift-click: select rectangle from anchor to this cell
+      const keys = getCellRangeKeys(statementName, anchorCell, { row: rowIdx, col: colIdx });
+      setSelectedCells(new Set(keys));
+      // Do NOT update anchorCell here
+    } else {
+      // Normal click: set anchor and select just this cell
+      setAnchorCell({ row: rowIdx, col: colIdx });
+      setCurrentCell({ row: rowIdx, col: colIdx });
+      setIsSelecting(true);
+      setSelectedCells(new Set([getCellKey(statementName, rowIdx, colIdx)]));
+    }
+  };
+
+  // Handler for mouse over (drag selection)
+  const handleCellMouseOver = (e: React.MouseEvent, statementName: string, rowIdx: number, colIdx: number) => {
+    if (!isSelecting || !anchorCell) return;
+    setCurrentCell({ row: rowIdx, col: colIdx });
+    const keys = getCellRangeKeys(statementName, anchorCell, { row: rowIdx, col: colIdx });
+    setSelectedCells(new Set(keys));
+  };
+
+  // Handler for mouse up (end selection)
+  const handleCellMouseUp = () => {
+    setIsSelecting(false);
+    setCurrentCell(null);
+    // Do NOT clear anchorCell here
+  };
+
+  // Add event listeners to handle mouse up outside the table
+  useEffect(() => {
+    if (isSelecting) {
+      window.addEventListener('mouseup', handleCellMouseUp);
+      return () => window.removeEventListener('mouseup', handleCellMouseUp);
+    }
+  }, [isSelecting]);
+
+  // Handler for right-click (context menu) on a cell
+  const handleCellRightClick = (e: React.MouseEvent, statementName: string, rowIdx: number, colIdx: number) => {
+    e.preventDefault();
+    const key = getCellKey(statementName, rowIdx, colIdx);
+    if (selectedCells.size > 1 && selectedCells.has(key)) {
+      // If right-clicking a cell within the selection, mark/unmark the whole selection
+      setMarkedCells(prev => {
+        const newSet = new Set(prev);
+        const allSelectedGreen = Array.from(selectedCells).every(k => newSet.has(k));
+        if (allSelectedGreen) {
+          selectedCells.forEach(k => newSet.delete(k));
+        } else {
+          selectedCells.forEach(k => newSet.add(k));
+        }
+        return newSet;
+      });
+      setSelectedCells(new Set());
+    } else {
+      // Otherwise, just toggle this cell
+      setMarkedCells(prev => {
+        const newSet = new Set(prev);
+        if (newSet.has(key)) {
+          newSet.delete(key);
+        } else {
+          newSet.add(key);
+        }
+        return newSet;
+      });
+      setSelectedCells(new Set());
+    }
   };
 
   return (
@@ -493,6 +597,14 @@ function App() {
                                           key={colIndex}
                                           onMouseEnter={(e) => handleTableCellHover(row[header] || '', activeStatement.pageNumber)}
                                           onMouseLeave={handleTableCellLeave}
+                                          onContextMenu={e => handleCellRightClick(e, activeStatement.name, rowIndex, colIndex)}
+                                          onMouseDown={e => handleCellMouseDown(e, activeStatement.name, rowIndex, colIndex)}
+                                          onMouseOver={e => handleCellMouseOver(e, activeStatement.name, rowIndex, colIndex)}
+                                          className={
+                                            (markedCells.has(getCellKey(activeStatement.name, rowIndex, colIndex)) ? 'green-marked-cell ' : '') +
+                                            (selectedCells.has(getCellKey(activeStatement.name, rowIndex, colIndex)) ? 'blue-selected-cell' : '')
+                                          }
+                                          style={{ userSelect: 'none' }}
                                         >
                                           {row[header] || ''}
                                         </td>
@@ -521,9 +633,10 @@ function App() {
           ref={floatingPageRef}
           style={{
             position: 'fixed',
-            left: `${floatingPagePosition.x}px`,
-            top: `${floatingPagePosition.y}px`,
-            width: pdfViewerRef.current?.offsetWidth || 'auto',
+            left: floatingPagePosition.x,
+            top: floatingPagePosition.y,
+            width: floatingPagePosition.width,
+            height: floatingPagePosition.height,
             zIndex: 1000,
             pointerEvents: 'none',
             opacity: 0.97,
@@ -536,7 +649,7 @@ function App() {
           >
             <Page
               pageNumber={floatingPageNumber}
-              width={undefined}
+              width={floatingPagePosition.width}
               scale={1}
               renderTextLayer={false}
               renderAnnotationLayer={false}
@@ -548,4 +661,4 @@ function App() {
   );
 }
 
-export default App; 
+export default App;
