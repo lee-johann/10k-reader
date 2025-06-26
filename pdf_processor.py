@@ -13,10 +13,75 @@ import sys
 import re
 import json
 from pathlib import Path
-import tabula
 import camelot
 import openpyxl
 import functools
+import subprocess
+import signal
+import contextlib
+import io
+
+
+class ConsoleOutputRedirector:
+    """
+    Context manager to redirect console output to a file.
+    """
+    def __init__(self, output_path):
+        self.output_path = output_path
+        self.original_stdout = sys.stdout
+        self.original_stderr = sys.stderr
+        self.output_file = None
+        
+    def __enter__(self):
+        # Create output directory if it doesn't exist
+        self.output_path.parent.mkdir(exist_ok=True)
+        
+        # Open file for writing
+        self.output_file = open(self.output_path, 'w', encoding='utf-8')
+        
+        # Create a custom stdout that writes to both file and original stdout
+        class TeeOutput:
+            def __init__(self, original, file):
+                self.original = original
+                self.file = file
+                
+            def write(self, text):
+                self.original.write(text)
+                self.file.write(text)
+                self.file.flush()
+                
+            def flush(self):
+                self.original.flush()
+                self.file.flush()
+        
+        # Redirect stdout and stderr
+        sys.stdout = TeeOutput(self.original_stdout, self.output_file)
+        sys.stderr = TeeOutput(self.original_stderr, self.output_file)
+        
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # Restore original stdout and stderr
+        sys.stdout = self.original_stdout
+        sys.stderr = self.original_stderr
+        
+        # Close the file
+        if self.output_file:
+            self.output_file.close()
+
+
+def redirect_output_to_file(output_path):
+    """
+    Decorator to redirect all output to a file during function execution.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            console_output_path = output_path / "console_output"
+            with ConsoleOutputRedirector(console_output_path):
+                return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 @click.command()
@@ -36,13 +101,22 @@ def process_pdf(pdf_path, search_text, min_page, output_dir, method, debug):
     
     PDF_PATH: Path to the PDF file to process
     """
+    output_path = Path(output_dir)
+    output_path.mkdir(exist_ok=True)
+    
+    # Redirect output to file
+    console_output_path = output_path / "console_output"
+    with ConsoleOutputRedirector(console_output_path):
+        _process_pdf_internal(pdf_path, search_text, min_page, output_path, method, debug)
+
+
+def _process_pdf_internal(pdf_path, search_text, min_page, output_path, method, debug):
+    """
+    Internal processing function that runs with output redirection.
+    """
     click.echo(f"Processing PDF: {pdf_path}")
     click.echo(f"Searching for text: '{search_text}' (excluding 'Equity')")
     click.echo(f"Starting from page: {min_page}")
-    
-    # Create output directory
-    output_path = Path(output_dir)
-    output_path.mkdir(exist_ok=True)
     
     # Step 1: Find the page with the specified text (and not the excluded text)
     target_page = find_page_with_text(pdf_path, search_text, min_page)
@@ -165,10 +239,37 @@ def process_table_data(df, debug=False):
             continue
         row_str = row_str.replace('$', '').strip()
         parts = row_str.split()
-        if len(parts) < 2:
+        if len(parts) < 1:  # Changed from < 2 to < 1 to allow single-word rows
             if debug:
                 print(f'SKIPPED (too few parts): {repr(row_str)}')
             continue
+        
+        # Check if this row has any numbers
+        has_numbers = False
+        for part in parts:
+            # Check for bracketed numbers like (3,514)
+            if part.startswith('(') and part.endswith(')') and len(part) > 2:
+                bracket_content = part[1:-1]
+                if re.match(r'^[\d,]+$', bracket_content):
+                    has_numbers = True
+                    break
+            # Check for regular numbers (including those with commas)
+            elif not '(' in part and not ')' in part:
+                clean_part = part.replace(',', '').replace('$', '').strip()
+                if re.match(r'^-?[\d]+\.?[\d]*$', clean_part):
+                    has_numbers = True
+                    break
+        
+        # If no numbers found, treat as a section header and keep it
+        if not has_numbers:
+            # This is a section header or complex text row - keep all text in first column
+            processed_row = [row_str] + [''] * (len(df.columns) - 1)  # Fill remaining columns with empty strings
+            processed_rows.append(processed_row)
+            if debug:
+                print(f'KEPT TEXT ROW: {repr(row_str)}')
+            continue
+        
+        # Process rows with numbers as before
         number_parts = []
         i = len(parts) - 1
         while i >= 0:
@@ -183,7 +284,7 @@ def process_table_data(df, debug=False):
                         is_bracketed_number = True
                         is_number = True
             elif not '(' in part and not ')' in part:
-                clean_part = part.replace(',', '')
+                clean_part = part.replace(',', '').replace('$', '').strip()
                 if re.match(r'^-?[\d]+\.?[\d]*$', clean_part):
                     is_number = True
             if is_number:
@@ -191,14 +292,17 @@ def process_table_data(df, debug=False):
                     number_str = bracket_content.replace(',', '')
                     number_parts.insert(0, f"-{number_str}")
                 else:
-                    number_parts.insert(0, part.replace(',', ''))
+                    number_parts.insert(0, clean_part)
                 i -= 1
             else:
                 break
         text_parts = parts[:i+1]
         if not text_parts or not number_parts:
+            # If we can't properly separate text and numbers, keep everything in first column
+            processed_row = [row_str] + [''] * (len(df.columns) - 1)
+            processed_rows.append(processed_row)
             if debug:
-                print(f'SKIPPED (no text or numbers): {repr(row_str)}')
+                print(f'KEPT COMPLEX ROW: {repr(row_str)}')
             continue
         text_column = ' '.join(text_parts)
         processed_row = [text_column] + number_parts
@@ -311,6 +415,302 @@ def extract_header_info(pdf_path, debug=False):
         return None
 
 
+def extract_best_camelot_table(pdf_path, page_num=1, debug=False):
+    """
+    Extract tables using Camelot in stream mode, return the table with the most rows.
+    """
+    import camelot
+    best_table = None
+    max_rows = 0
+    best_df = None
+    try:
+        tables = camelot.read_pdf(str(pdf_path), pages=str(page_num), flavor="stream")
+        for i, table in enumerate(tables):
+            nrows = table.df.shape[0]
+            if debug:
+                print(f"Camelot (stream) Table {i}: shape={table.df.shape}")
+            if nrows > max_rows:
+                max_rows = nrows
+                best_table = table
+                best_df = table.df
+    except Exception as e:
+        if debug:
+            print(f"Camelot (stream) error: {e}")
+    if debug and best_table is not None:
+        print(f"Best Camelot table: rows={max_rows}")
+    return best_df
+
+
+def try_all_table_extractors(pdf_path, page_num=1, debug=False):
+    print("=== Camelot (stream) ===")
+    best_df = extract_best_camelot_table(pdf_path, page_num, debug=debug)
+    if best_df is not None:
+        print(best_df)
+    else:
+        print("No table found with Camelot.")
+
+    print("=== pdfplumber ===")
+    try:
+        with pdfplumber.open(str(pdf_path)) as pdf:
+            page = pdf.pages[page_num - 1]
+            tables = page.extract_tables()
+            for i, table in enumerate(tables):
+                print(f"pdfplumber Table {i}:")
+                for row in table:
+                    print(row)
+    except Exception as e:
+        print(f"pdfplumber error: {e}")
+
+
+def merge_extraction_results(pdfplumber_df, camelot_df, debug=False):
+    """
+    Merge pdfplumber and camelot extraction results.
+    Insert camelot-only rows into pdfplumber results at the correct positions.
+    Truncate camelot columns by merging text and removing unwanted columns.
+    """
+    if pdfplumber_df is None or pdfplumber_df.empty:
+        return camelot_df
+    if camelot_df is None or camelot_df.empty:
+        return pdfplumber_df
+    
+    if debug:
+        print("MERGING: pdfplumber rows:", len(pdfplumber_df))
+        print("MERGING: camelot rows:", len(camelot_df))
+        print("MERGING: pdfplumber columns:", len(pdfplumber_df.columns))
+        print("MERGING: camelot columns:", len(camelot_df.columns))
+    
+    # Clean camelot DataFrame by removing unwanted columns and merging text
+    cleaned_camelot_df = clean_camelot_dataframe(camelot_df, debug)
+    
+    if debug:
+        print("\n=== CLEANED CAMELOT TABLE ===")
+        print(cleaned_camelot_df)
+        print("=== END CLEANED CAMELOT TABLE ===\n")
+    
+    # Convert both to list of rows for easier manipulation
+    pdfplumber_rows = pdfplumber_df.values.tolist()
+    camelot_rows = cleaned_camelot_df.values.tolist()
+    
+    # Create a mapping of camelot row content to their positions
+    camelot_content_map = {}
+    for i, row in enumerate(camelot_rows):
+        row_content = ' '.join([str(cell) for cell in row if pd.notna(cell) and str(cell).strip()])
+        if row_content.strip():
+            camelot_content_map[row_content] = i
+    
+    # Create a mapping of pdfplumber row content to their positions
+    pdfplumber_content_map = {}
+    for i, row in enumerate(pdfplumber_rows):
+        row_content = ' '.join([str(cell) for cell in row if pd.notna(cell) and str(cell).strip()])
+        if row_content.strip():
+            pdfplumber_content_map[row_content] = i
+    
+    # Find camelot-only rows
+    camelot_only_rows = []
+    for content, camelot_pos in camelot_content_map.items():
+        if content not in pdfplumber_content_map:
+            # Skip rows that contain alphabetically spelled months (dates)
+            months = ['january', 'february', 'march', 'april', 'may', 'june', 
+                     'july', 'august', 'september', 'october', 'november', 'december']
+            content_lower = content.lower()
+            contains_month = any(month in content_lower for month in months)
+            
+            if contains_month:
+                if debug:
+                    print(f"MERGING: Skipping camelot-only row with date: {content}")
+                continue
+            
+            camelot_only_rows.append((camelot_pos, camelot_rows[camelot_pos]))
+    
+    if debug and camelot_only_rows:
+        print(f"MERGING: Found {len(camelot_only_rows)} camelot-only rows")
+        for pos, row in camelot_only_rows:
+            print(f"MERGING: Camelot-only row at position {pos}: {row}")
+    
+    # Insert camelot-only rows into pdfplumber results
+    merged_rows = pdfplumber_rows.copy()
+    offset = 0  # Track position offset due to insertions
+    
+    for camelot_pos, camelot_row in camelot_only_rows:
+        # Find the best insertion position in pdfplumber results
+        # Try to insert at the same relative position
+        insert_pos = min(camelot_pos, len(merged_rows))
+        
+        # Insert the row
+        merged_rows.insert(insert_pos + offset, camelot_row)
+        offset += 1
+        
+        if debug:
+            print(f"MERGING: Inserted camelot row at position {insert_pos + offset - 1}")
+    
+    # Convert back to DataFrame with proper column names
+    if merged_rows:
+        # Use pdfplumber column names and extend if needed
+        column_names = list(pdfplumber_df.columns)
+        for i in range(len(column_names), len(merged_rows[0])):
+            column_names.append(f'col_{i}')
+        
+        merged_df = pd.DataFrame(merged_rows, columns=column_names)
+        
+        # Remove columns that are empty or only contain None values
+        columns_to_keep = []
+        for col_idx, col_name in enumerate(merged_df.columns):
+            col_values = merged_df.iloc[:, col_idx]
+            # Check if column has any non-empty, non-None values
+            has_meaningful_data = False
+            for val in col_values:
+                if pd.notna(val) and str(val).strip() and str(val).strip() != 'None':
+                    has_meaningful_data = True
+                    break
+            
+            if has_meaningful_data:
+                columns_to_keep.append(col_idx)
+            else:
+                if debug:
+                    print(f"MERGING: Removing empty/None column {col_idx} ({col_name})")
+        
+        if columns_to_keep:
+            merged_df = merged_df.iloc[:, columns_to_keep]
+            if debug:
+                print(f"MERGING: After removing empty columns: {len(merged_df.columns)} columns")
+        else:
+            if debug:
+                print("MERGING: No meaningful columns found after filtering")
+            return pd.DataFrame()
+        
+        if debug:
+            print(f"MERGING: Final merged result has {len(merged_df)} rows and {len(merged_df.columns)} columns")
+            print("\n=== FINAL MERGED TABLE ===")
+            print(merged_df)
+            print("=== END FINAL MERGED TABLE ===\n")
+        return merged_df
+    
+    return pdfplumber_df
+
+
+def clean_camelot_dataframe(camelot_df, debug=False):
+    """
+    Clean camelot DataFrame by:
+    1. Removing columns with only "..." or "$"
+    2. Merging text columns into one column
+    3. Keeping only meaningful data columns
+    4. Only keeping rows where columns 2 and 3 have numbers in them
+    """
+    if camelot_df is None or camelot_df.empty:
+        return camelot_df
+    
+    if debug:
+        print("CLEANING: Original camelot shape:", camelot_df.shape)
+    
+    # Remove columns that contain only "..." or "$"
+    columns_to_keep = []
+    for col_idx, col_name in enumerate(camelot_df.columns):
+        col_values = camelot_df.iloc[:, col_idx].astype(str)
+        # Check if column contains only "..." or "$" or is empty
+        unique_values = set(col_values.str.strip())
+        if len(unique_values) <= 2 and all(val in ['...', '$', '', 'nan', 'None'] for val in unique_values):
+            if debug:
+                print(f"CLEANING: Removing column {col_idx} ({col_name}) with values: {unique_values}")
+            continue
+        columns_to_keep.append(col_idx)
+    
+    if not columns_to_keep:
+        if debug:
+            print("CLEANING: No meaningful columns found, returning original")
+        return camelot_df
+    
+    # Keep only meaningful columns
+    cleaned_df = camelot_df.iloc[:, columns_to_keep].copy()
+    
+    if debug:
+        print("CLEANING: After removing unwanted columns:", cleaned_df.shape)
+    
+    # Merge text columns into one column
+    if len(cleaned_df.columns) > 1:
+        # Find the first column that contains mostly text (not numbers)
+        text_col_idx = None
+        for col_idx in range(len(cleaned_df.columns)):
+            col_values = cleaned_df.iloc[:, col_idx].astype(str)
+            # Count how many values look like text vs numbers
+            text_count = 0
+            total_count = 0
+            for val in col_values:
+                if pd.notna(val) and str(val).strip():
+                    total_count += 1
+                    # Check if it's mostly text (contains letters and not just numbers/symbols)
+                    if re.search(r'[a-zA-Z]', str(val)) and not re.match(r'^[\d\s\-\+\(\)\$\,\.]+$', str(val)):
+                        text_count += 1
+            
+            if total_count > 0 and text_count / total_count > 0.5:
+                text_col_idx = col_idx
+                break
+        
+        if text_col_idx is not None and text_col_idx > 0:
+            # Merge text from earlier columns into the text column
+            for row_idx in range(len(cleaned_df)):
+                merged_text = []
+                for col_idx in range(text_col_idx):
+                    val = cleaned_df.iloc[row_idx, col_idx]
+                    if pd.notna(val) and str(val).strip():
+                        merged_text.append(str(val).strip())
+                
+                if merged_text:
+                    current_text = cleaned_df.iloc[row_idx, text_col_idx]
+                    if pd.notna(current_text) and str(current_text).strip():
+                        merged_text.append(str(current_text).strip())
+                    cleaned_df.iloc[row_idx, text_col_idx] = ' '.join(merged_text)
+            
+            # Remove the merged columns
+            cleaned_df = cleaned_df.iloc[:, text_col_idx:]
+            
+            if debug:
+                print("CLEANING: After merging text columns:", cleaned_df.shape)
+    
+    # Filter rows to only keep those where columns 2 and 3 (Value_1 and Value_2) have numbers
+    if len(cleaned_df.columns) >= 3:
+        rows_to_keep = []
+        for row_idx in range(len(cleaned_df)):
+            col2_val = cleaned_df.iloc[row_idx, 1] if len(cleaned_df.columns) > 1 else None  # Value_1
+            col3_val = cleaned_df.iloc[row_idx, 2] if len(cleaned_df.columns) > 2 else None  # Value_2
+            
+            # Check if both columns have numbers
+            has_numbers = False
+            if pd.notna(col2_val) and pd.notna(col3_val):
+                col2_str = str(col2_val).strip()
+                col3_str = str(col3_val).strip()
+                
+                # Check for bracketed numbers like (3,514)
+                def is_number(val):
+                    if val.startswith('(') and val.endswith(')') and len(val) > 2:
+                        bracket_content = val[1:-1]
+                        return re.match(r'^[\d,]+$', bracket_content)
+                    # Check for regular numbers
+                    clean_val = val.replace(',', '').replace('$', '').strip()
+                    return re.match(r'^-?[\d]+\.?[\d]*$', clean_val)
+                
+                if is_number(col2_str) and is_number(col3_str):
+                    has_numbers = True
+            
+            if has_numbers:
+                rows_to_keep.append(row_idx)
+                if debug:
+                    print(f"CLEANING: Keeping row {row_idx} with numbers: col2='{col2_val}', col3='{col3_val}'")
+            else:
+                if debug:
+                    print(f"CLEANING: Removing row {row_idx} - no numbers in cols 2&3: col2='{col2_val}', col3='{col3_val}'")
+        
+        if rows_to_keep:
+            cleaned_df = cleaned_df.iloc[rows_to_keep].reset_index(drop=True)
+            if debug:
+                print("CLEANING: After filtering rows with numbers:", cleaned_df.shape)
+        else:
+            if debug:
+                print("CLEANING: No rows with numbers found, returning empty DataFrame")
+            return pd.DataFrame()
+    
+    return cleaned_df
+
+
 def extract_table_to_excel(pdf_path, output_path, method, debug=False):
     """
     Extract tables from the PDF and save to Excel.
@@ -325,117 +725,128 @@ def extract_table_to_excel(pdf_path, output_path, method, debug=False):
     else:
         click.echo("⚠️  No year headers found, using default column names")
     
-    # Try the specified method first, then fall back to others
-    methods_to_try = [method]
-    if method != 'pdfplumber':
-        methods_to_try.append('pdfplumber')
-    if method != 'tabula':
-        methods_to_try.append('tabula')
+    # Always try both pdfplumber and camelot
+    pdfplumber_df = None
+    camelot_df = None
     
-    for current_method in methods_to_try:
-        try:
-            click.echo(f"Trying table extraction with {current_method}...")
-            
-            if current_method == 'tabula':
-                # Use tabula-py for table extraction
-                tables = tabula.read_pdf(str(pdf_path), pages='all')
-                
+    # Try pdfplumber first
+    try:
+        click.echo(f"Trying table extraction with pdfplumber...")
+        with pdfplumber.open(pdf_path) as pdf:
+            all_tables = []
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                if debug:
+                    for t_idx, table in enumerate(tables):
+                        print(f"PDFPLUMBER DEBUG: TABLE {t_idx}")
+                        for row in table:
+                            print(f"PDFPLUMBER DEBUG: ROW: {row}")
                 if tables:
-                    # Combine all tables into one DataFrame
-                    combined_df = pd.concat(tables, ignore_index=True)
-                    # Process the table data
-                    processed_df = process_table_data(combined_df, debug)
-                    
-                    # Update column names if we found year headers
-                    if header_years and len(header_years) >= len(processed_df.columns) - 1:
-                        new_columns = ['Description'] + header_years[:len(processed_df.columns) - 1]
-                        processed_df.columns = new_columns
-                    
-                    processed_df.to_excel(excel_path, index=False)
-                    click.echo(f"📊 Extracted and processed {len(tables)} tables using tabula")
-                    return excel_path
-                else:
-                    click.echo("⚠️  No tables found using tabula")
-                    
-            elif current_method == 'camelot':
-                # Use camelot-py for table extraction
-                try:
-                    tables = camelot.read_pdf(str(pdf_path), pages='all')
-                    
-                    if tables:
-                        # Combine all tables into one DataFrame
-                        dfs = []
-                        for table in tables:
-                            df = table.df
-                            # Clean up the DataFrame
+                    for table in tables:
+                        if table and len(table) > 1:
+                            df = pd.DataFrame(table[1:], columns=table[0])
+                            if df.columns.duplicated().any():
+                                df.columns = [f"{col}_{i}" if df.columns.duplicated()[i] else col for i, col in enumerate(df.columns)]
                             df = df.replace('', pd.NA).dropna(how='all')
-                            dfs.append(df)
-                        
-                        if dfs:
-                            combined_df = pd.concat(dfs, ignore_index=True)
-                            # Process the table data
-                            processed_df = process_table_data(combined_df, debug)
-                            
-                            # Update column names if we found year headers
-                            if header_years and len(header_years) >= len(processed_df.columns) - 1:
-                                new_columns = ['Description'] + header_years[:len(processed_df.columns) - 1]
-                                processed_df.columns = new_columns
-                            
-                            processed_df.to_excel(excel_path, index=False)
-                            click.echo(f"📊 Extracted and processed {len(tables)} tables using camelot")
-                            return excel_path
-                        else:
-                            click.echo("⚠️  No valid tables found using camelot")
-                    else:
-                        click.echo("⚠️  No tables found using camelot")
-                except Exception as e:
-                    if "Ghostscript is not installed" in str(e):
-                        click.echo("⚠️  Ghostscript not found for camelot, trying next method...")
-                        continue
-                    else:
-                        raise e
-                        
-            elif current_method == 'pdfplumber':
-                # Use pdfplumber for table extraction
-                with pdfplumber.open(pdf_path) as pdf:
-                    all_tables = []
-                    for page in pdf.pages:
-                        tables = page.extract_tables()
-                        if debug:
-                            for t_idx, table in enumerate(tables):
-                                print(f"PDFPLUMBER DEBUG: TABLE {t_idx}")
-                                for row in table:
-                                    print(f"PDFPLUMBER DEBUG: ROW: {row}")
-                        if tables:
-                            for table in tables:
-                                if table and len(table) > 1:
-                                    df = pd.DataFrame(table[1:], columns=table[0])
-                                    if df.columns.duplicated().any():
-                                        df.columns = [f"{col}_{i}" if df.columns.duplicated()[i] else col for i, col in enumerate(df.columns)]
-                                    df = df.replace('', pd.NA).dropna(how='all')
-                                    all_tables.append(df)
-                    
-                    if all_tables:
-                        combined_df = pd.concat(all_tables, ignore_index=True)
-                        # Process the table data
-                        processed_df = process_table_data(combined_df, debug)
-                        
-                        # Update column names if we found year headers
-                        if header_years and len(header_years) >= len(processed_df.columns) - 1:
-                            new_columns = ['Description'] + header_years[:len(processed_df.columns) - 1]
-                            processed_df.columns = new_columns
-                        
-                        processed_df.to_excel(excel_path, index=False)
-                        click.echo(f"📊 Extracted and processed {len(all_tables)} tables using pdfplumber")
-                        return excel_path
-                    else:
-                        click.echo("⚠️  No tables found using pdfplumber")
+                            all_tables.append(df)
+            if all_tables:
+                combined_df = pd.concat(all_tables, ignore_index=True)
+                pdfplumber_df = process_table_data(combined_df, debug)
+                click.echo(f"📊 Extracted and processed {len(all_tables)} tables using pdfplumber")
+            else:
+                click.echo("⚠️  No tables found using pdfplumber")
+    except Exception as e:
+        click.echo(f"❌ Error with pdfplumber: {e}")
+    
+    # Try camelot
+    try:
+        click.echo(f"Trying table extraction with camelot...")
+        camelot_df = extract_best_camelot_table(pdf_path, page_num=1, debug=debug)
+        if camelot_df is not None:
+            camelot_df = process_table_data(camelot_df, debug)
+            click.echo(f"📊 Extracted and processed table using camelot")
+        else:
+            click.echo("⚠️  No valid tables found using camelot")
+    except Exception as e:
+        click.echo(f"❌ Error with camelot: {e}")
+    
+    # Merge results
+    if pdfplumber_df is not None or camelot_df is not None:
+        merged_df = merge_extraction_results(pdfplumber_df, camelot_df, debug=debug)
         
-        except Exception as e:
-            click.echo(f"❌ Error with {current_method}: {e}")
-            continue
+        # Update column names if we found year headers
+        if header_years and len(header_years) >= len(merged_df.columns) - 1:
+            new_columns = ['Description'] + header_years[:len(merged_df.columns) - 1]
+            merged_df.columns = new_columns
+        
+        merged_df.to_excel(excel_path, index=False)
+        click.echo(f"📊 Merged extraction results saved to Excel")
+        return excel_path
     
     click.echo("❌ All table extraction methods failed")
+    return None
+
+
+def extract_table_from_page(pdf_path, statement_name, debug=False):
+    header_years = extract_header_info(pdf_path, debug)
+    if header_years:
+        click.echo(f"📅 Found year headers: {header_years}")
+    else:
+        click.echo("⚠️  No year headers found, using default column names")
+    if debug:
+        print("\n=== DEBUG: Trying all table extractors on first page ===")
+        try_all_table_extractors(pdf_path, page_num=1, debug=debug)
+    
+    # Always try both pdfplumber and camelot
+    pdfplumber_df = None
+    camelot_df = None
+    
+    # Try pdfplumber first
+    try:
+        click.echo(f"Trying table extraction with pdfplumber...")
+        with pdfplumber.open(pdf_path) as pdf:
+            all_tables = []
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                if debug:
+                    for t_idx, table in enumerate(tables):
+                        print(f"PDFPLUMBER DEBUG: TABLE {t_idx}")
+                        for row in table:
+                            print(f"PDFPLUMBER DEBUG: ROW: {row}")
+                if tables:
+                    for table in tables:
+                        if table and len(table) > 1:
+                            df = pd.DataFrame(table[1:], columns=table[0])
+                            if df.columns.duplicated().any():
+                                df.columns = [f"{col}_{i}" if df.columns.duplicated()[i] else col for i, col in enumerate(df.columns)]
+                            df = df.replace('', pd.NA).dropna(how='all')
+                            all_tables.append(df)
+            if all_tables:
+                combined_df = pd.concat(all_tables, ignore_index=True)
+                pdfplumber_df = process_table_data(combined_df, debug=debug)
+    except Exception as e:
+        click.echo(f"❌ Error with pdfplumber: {e}")
+    
+    # Try camelot
+    try:
+        click.echo(f"Trying table extraction with camelot...")
+        camelot_df = extract_best_camelot_table(pdf_path, page_num=1, debug=debug)
+        if camelot_df is not None:
+            camelot_df = process_table_data(camelot_df, debug=debug)
+    except Exception as e:
+        click.echo(f"❌ Error with camelot: {e}")
+    
+    # Merge results
+    if pdfplumber_df is not None or camelot_df is not None:
+        merged_df = merge_extraction_results(pdfplumber_df, camelot_df, debug=debug)
+        
+        # Update column names if we found year headers
+        if header_years and len(header_years) >= len(merged_df.columns) - 1:
+            new_columns = ['Description'] + header_years[:len(merged_df.columns) - 1]
+            merged_df.columns = new_columns
+        
+        return merged_df
+    
     return None
 
 
@@ -446,6 +857,17 @@ def extract_all_statements_to_excel(pdf_path, output_path, pdf_name, debug=False
     """
     output_path = Path(output_path)
     excel_path = output_path / f"{pdf_name}_extracted.xlsx"
+    
+    # Redirect output to file
+    console_output_path = output_path / "console_output"
+    with ConsoleOutputRedirector(console_output_path):
+        return _extract_all_statements_to_excel_internal(pdf_path, output_path, excel_path, pdf_name, debug)
+
+
+def _extract_all_statements_to_excel_internal(pdf_path, output_path, excel_path, pdf_name, debug=False):
+    """
+    Internal function that runs with output redirection.
+    """
     statements = [
         "CONSOLIDATED STATEMENTS OF INCOME",
         "CONSOLIDATED BALANCE SHEETS", 
@@ -482,78 +904,6 @@ def extract_all_statements_to_excel(pdf_path, output_path, pdf_name, debug=False
             return None
         click.echo(f"\n🎉 Successfully extracted {extracted_count} statements to {excel_path}")
         return excel_path
-
-
-def extract_table_from_page(pdf_path, statement_name, debug=False):
-    header_years = extract_header_info(pdf_path, debug=debug)
-    if header_years:
-        click.echo(f"📅 Found year headers: {header_years}")
-    else:
-        click.echo("⚠️  No year headers found, using default column names")
-    methods_to_try = ['pdfplumber', 'camelot', 'tabula']
-    for current_method in methods_to_try:
-        try:
-            click.echo(f"Trying table extraction with {current_method}...")
-            if current_method == 'tabula':
-                tables = tabula.read_pdf(str(pdf_path), pages='all')
-                if tables:
-                    combined_df = pd.concat(tables, ignore_index=True)
-                    processed_df = process_table_data(combined_df, debug=debug)
-                    if header_years and len(header_years) >= len(processed_df.columns) - 1:
-                        new_columns = ['Description'] + header_years[:len(processed_df.columns) - 1]
-                        processed_df.columns = new_columns
-                    return processed_df
-            elif current_method == 'camelot':
-                try:
-                    tables = camelot.read_pdf(str(pdf_path), pages='all')
-                    if tables:
-                        dfs = []
-                        for table in tables:
-                            df = table.df
-                            df = df.replace('', pd.NA).dropna(how='all')
-                            dfs.append(df)
-                        if dfs:
-                            combined_df = pd.concat(dfs, ignore_index=True)
-                            processed_df = process_table_data(combined_df, debug=debug)
-                            if header_years and len(header_years) >= len(processed_df.columns) - 1:
-                                new_columns = ['Description'] + header_years[:len(processed_df.columns) - 1]
-                                processed_df.columns = new_columns
-                            return processed_df
-                except Exception as e:
-                    if "Ghostscript is not installed" in str(e):
-                        click.echo("⚠️  Ghostscript not found for camelot, trying next method...")
-                        continue
-                    else:
-                        raise e
-            elif current_method == 'pdfplumber':
-                with pdfplumber.open(pdf_path) as pdf:
-                    all_tables = []
-                    for page in pdf.pages:
-                        tables = page.extract_tables()
-                        if debug:
-                            for t_idx, table in enumerate(tables):
-                                print(f"PDFPLUMBER DEBUG: TABLE {t_idx}")
-                                for row in table:
-                                    print(f"PDFPLUMBER DEBUG: ROW: {row}")
-                        if tables:
-                            for table in tables:
-                                if table and len(table) > 1:
-                                    df = pd.DataFrame(table[1:], columns=table[0])
-                                    if df.columns.duplicated().any():
-                                        df.columns = [f"{col}_{i}" if df.columns.duplicated()[i] else col for i, col in enumerate(df.columns)]
-                                    df = df.replace('', pd.NA).dropna(how='all')
-                                    all_tables.append(df)
-                    if all_tables:
-                        combined_df = pd.concat(all_tables, ignore_index=True)
-                        processed_df = process_table_data(combined_df, debug=debug)
-                        if header_years and len(header_years) >= len(processed_df.columns) - 1:
-                            new_columns = ['Description'] + header_years[:len(processed_df.columns) - 1]
-                            processed_df.columns = new_columns
-                        return processed_df
-        except Exception as e:
-            click.echo(f"❌ Error with {current_method}: {e}")
-            continue
-    return None
 
 
 def extract_all_statements_to_json(pdf_path, output_path, pdf_name):
