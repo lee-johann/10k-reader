@@ -34,6 +34,9 @@ if sys.platform == "darwin":
 import camelot
 import openpyxl
 
+# Import the validation module
+from table_validation import validate_financial_statements
+
 
 class ConsoleOutputRedirector:
     """
@@ -1342,12 +1345,29 @@ def extract_all_statements_to_json(pdf_path, output_path, pdf_name):
         click.echo("❌ No statements were successfully extracted")
         return None
     
+    # Perform validation checks on the extracted statements
+    try:
+        click.echo(f"🔍 Starting validation with {len(extracted_statements)} statements")
+        validation_results = validate_financial_statements(extracted_statements)
+        click.echo(f"✅ Validation completed: {validation_results['summary']['passed_checks']}/{validation_results['summary']['total_checks']} checks passed ({validation_results['summary']['pass_rate']}%)")
+        click.echo(f"🔍 Validation results: {validation_results}")
+    except Exception as e:
+        click.echo(f"⚠️  Validation failed: {e}")
+        import traceback
+        click.echo(f"⚠️  Validation error details: {traceback.format_exc()}")
+        validation_results = {
+            'checklist_results': {},
+            'summary': {'total_checks': 0, 'passed_checks': 0, 'failed_checks': 0, 'pass_rate': 0},
+            'balance_sheet_totals': None
+        }
+    
     # Return JSON string
     result = {
         "pdfName": pdf_name,
         "statements": extracted_statements,
         "extractedCount": len(extracted_statements),
-        "excelPath": str(excel_path)
+        "excelPath": str(excel_path),
+        "validation": validation_results
     }
     
     click.echo(f"\n🎉 Successfully extracted {len(extracted_statements)} statements")
