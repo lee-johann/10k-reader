@@ -13,13 +13,26 @@ import sys
 import re
 import json
 from pathlib import Path
-import camelot
-import openpyxl
 import functools
 import subprocess
 import signal
 import contextlib
 import io
+
+# Fix for macOS: Set library path for Ghostscript detection
+if sys.platform == "darwin":
+    # Add Homebrew lib path to DYLD_LIBRARY_PATH for Ghostscript detection
+    homebrew_lib = "/opt/homebrew/lib"
+    if os.path.exists(homebrew_lib):
+        current_dyld_path = os.environ.get('DYLD_LIBRARY_PATH', '')
+        if homebrew_lib not in current_dyld_path:
+            if current_dyld_path:
+                os.environ['DYLD_LIBRARY_PATH'] = f"{homebrew_lib}:{current_dyld_path}"
+            else:
+                os.environ['DYLD_LIBRARY_PATH'] = homebrew_lib
+
+import camelot
+import openpyxl
 
 
 class ConsoleOutputRedirector:
@@ -424,7 +437,7 @@ def extract_best_camelot_table(pdf_path, page_num=1, debug=False):
     max_rows = 0
     best_df = None
     try:
-        tables = camelot.read_pdf(str(pdf_path), pages=str(page_num), flavor="stream")
+        tables = camelot.read_pdf(str(pdf_path), pages=str(page_num), flavor="stream", edge_tol=100, strip_text='\n', row_tol=10)
         for i, table in enumerate(tables):
             nrows = table.df.shape[0]
             if debug:
@@ -588,19 +601,287 @@ def merge_extraction_results(pdfplumber_df, camelot_df, debug=False):
     return pdfplumber_df
 
 
-def clean_camelot_dataframe(camelot_df, debug=False):
+def merge_long_rows(camelot_df, debug=False, word_tolerance=15):
+    """
+    Merge rows that have word_tolerance words or more in the description field.
+    Also merge up short, lowercase descriptions with the row above.
+    This helps combine split rows that are part of the same logical row.
+    """
+    if camelot_df is None or camelot_df.empty or len(camelot_df) <= 1:
+        return camelot_df
+
+    if debug:
+        print("MERGING LONG ROWS: Original shape:", camelot_df.shape)
+        print("MERGING LONG ROWS: Raw DataFrame:")
+        for idx, row in camelot_df.iterrows():
+            desc = row.iloc[0]
+            desc_clean = str(desc).replace('\n', ' ').replace('\r', ' ').strip()
+            word_count = len(desc_clean.split())
+            values = [repr(row.iloc[i]) for i in range(1, len(row))]
+            # Number detection
+            is_number = []
+            for val in values:
+                val_clean = str(val).replace('\n', ' ').replace('\r', ' ').strip()
+                if val_clean and val_clean != 'nan':
+                    if val_clean.startswith('(') and val_clean.endswith(')') and len(val_clean) > 2:
+                        bracket_content = val_clean[1:-1]
+                        is_number.append(bool(re.match(r'^[\d,]+$', bracket_content)))
+                    elif re.match(r'^-?[\d,]+\.?[\d]*$', val_clean.replace(',', '').replace('$', '')):
+                        is_number.append(True)
+                    else:
+                        is_number.append(False)
+                else:
+                    is_number.append(False)
+            print(f"Row {idx}:")
+            print(f"  Raw desc: {repr(desc)}")
+            print(f"  Clean desc: {repr(desc_clean)}")
+            print(f"  Word count: {word_count}")
+            print(f"  Values: {values}")
+            print(f"  Is number: {is_number}")
+
+    # First pass: merge down long descriptions
+    merged_rows = []
+    i = 0
+    
+    while i < len(camelot_df):
+        current_row = camelot_df.iloc[i].copy()
+        current_text = str(current_row.iloc[0]).strip() if len(current_row) > 0 else ""
+        
+        # Check if this row has numbers in later columns
+        has_numbers = False
+        for col_idx in range(1, len(current_row)):
+            val = current_row.iloc[col_idx]
+            if pd.notna(val) and str(val).strip():
+                # Check if it's a number
+                val_str = str(val).strip()
+                if val_str.startswith('(') and val_str.endswith(')') and len(val_str) > 2:
+                    bracket_content = val_str[1:-1]
+                    if re.match(r'^[\d,]+$', bracket_content):
+                        has_numbers = True
+                        break
+                elif re.match(r'^-?[\d,]+\.?[\d]*$', val_str.replace(',', '').replace('$', '')):
+                    has_numbers = True
+                    break
+        
+        # If current row has numbers, keep it as is (don't merge)
+        if has_numbers:
+            merged_rows.append(current_row)
+            i += 1
+        else:
+            # This row doesn't have numbers, check if it's a section header or should be merged down
+            def is_section_header(text):
+                if not text or text == 'nan':
+                    return False
+                
+                text = text.strip()
+                
+                # Only accept if starts with a capitalized word
+                if not text or not text[0].isupper():
+                    return False
+                
+                # Check for colon ending (common in section headers)
+                if text.endswith(':'):
+                    return True
+                
+                # Check if it's a short, standalone phrase
+                word_count = len(text.split())
+                if word_count < word_tolerance:
+                    # Check if it doesn't end with continuation words
+                    continuation_words = ['and', 'or', 'the', 'of', 'in', 'to', 'for', 'with', 'by', 'from']
+                    words = text.lower().split()
+                    if words and words[-1] not in continuation_words:
+                        # Check if it looks like a complete phrase
+                        if not text.endswith(',') and not text.endswith(';'):
+                            # Additional check: if it's just a single word, it's likely not a section header
+                            if word_count == 1:
+                                return False
+                            return True
+                
+                # Check for specific patterns that indicate section headers
+                header_patterns = [
+                    r'^[A-Z][a-z\s]+:$',  # Capitalized words ending with colon
+                    r'^[A-Z\s]+$',        # All caps (like "ASSETS")
+                    r'^[A-Z][a-z\s]+assets?$',  # Ends with "asset" or "assets"
+                    r'^[A-Z][a-z\s]+liabilities?$',  # Ends with "liability" or "liabilities"
+                    r'^[A-Z][a-z\s]+equity$',  # Ends with "equity"
+                ]
+                
+                for pattern in header_patterns:
+                    if re.match(pattern, text, re.IGNORECASE):
+                        return True
+                
+                return False
+            
+            if is_section_header(current_text):
+                # This is a section header, keep it separate
+                merged_rows.append(current_row)
+                if debug:
+                    print(f"MERGING LONG ROWS: Keeping section header: {current_text}")
+                i += 1
+            elif len(current_text.split()) >= word_tolerance:
+                # This row has word_tolerance+ words but no numbers, look ahead to find the next row with numbers
+                next_row_with_numbers = None
+                next_row_idx = None
+                
+                for j in range(i + 1, len(camelot_df)):
+                    test_row = camelot_df.iloc[j]
+                    test_text = str(test_row.iloc[0]).strip() if len(test_row) > 0 else ""
+                    
+                    # Check if this test row is a section header
+                    if is_section_header(test_text):
+                        # Stop looking, we've hit another section header
+                        break
+                    
+                    test_has_numbers = False
+                    for col_idx in range(1, len(test_row)):
+                        val = test_row.iloc[col_idx]
+                        if pd.notna(val) and str(val).strip():
+                            val_str = str(val).strip()
+                            if val_str.startswith('(') and val_str.endswith(')') and len(val_str) > 2:
+                                bracket_content = val_str[1:-1]
+                                if re.match(r'^[\d,]+$', bracket_content):
+                                    test_has_numbers = True
+                                    break
+                            elif re.match(r'^-?[\d,]+\.?[\d]*$', val_str.replace(',', '').replace('$', '')):
+                                test_has_numbers = True
+                                break
+                    
+                    if test_has_numbers:
+                        next_row_with_numbers = test_row
+                        next_row_idx = j
+                        break
+                
+                if next_row_with_numbers is not None:
+                    # Merge all rows from i to next_row_idx
+                    merged_text_parts = []
+                    merged_data = None
+                    
+                    for k in range(i, next_row_idx + 1):
+                        row = camelot_df.iloc[k]
+                        text_part = str(row.iloc[0]).strip() if len(row) > 0 else ""
+                        if text_part and text_part != 'nan':
+                            merged_text_parts.append(text_part)
+                        
+                        # Use the last row's data (which should have the numbers)
+                        if k == next_row_idx:
+                            merged_data = row.copy()
+                    
+                    if merged_text_parts and merged_data is not None:
+                        # Combine the text parts
+                        merged_text = ' '.join(merged_text_parts)
+                        merged_data.iloc[0] = merged_text
+                        merged_rows.append(merged_data)
+                        
+                        if debug:
+                            print(f"MERGING LONG ROWS: Merged rows {i}-{next_row_idx} into: {merged_text}")
+                        
+                        i = next_row_idx + 1
+                    else:
+                        # Fallback: just add current row
+                        merged_rows.append(current_row)
+                        i += 1
+                else:
+                    # No next row with numbers found, just add current row
+                    merged_rows.append(current_row)
+                    i += 1
+            else:
+                # This row has less than word_tolerance words and no numbers, keep as is
+                merged_rows.append(current_row)
+                i += 1
+    
+    # Second pass: merge up short, lowercase descriptions
+    final_rows = []
+    i = 0
+    
+    while i < len(merged_rows):
+        current_row = merged_rows[i].copy()
+        current_text = str(current_row.iloc[0]).strip() if len(current_row) > 0 else ""
+        
+        # Check if this row should be merged up (short, lowercase description)
+        def should_merge_up(text):
+            if not text or text == 'nan':
+                return False
+            
+            text = text.strip()
+            word_count = len(text.split())
+            
+            # Check if it's a short, lowercase description
+            if word_count < word_tolerance and not text.isupper():
+                # Check if it doesn't start with a capital letter (indicating it's not a section header)
+                if text and not text[0].isupper():
+                    return True
+                # Also check if it's all lowercase (common for continuation text)
+                if text.islower():
+                    return True
+            
+            return False
+        
+        if should_merge_up(current_text):
+            # This row should be merged up with the previous row
+            if final_rows:
+                # Merge with the previous row
+                prev_row = final_rows.pop()
+                prev_text = str(prev_row.iloc[0]).strip() if len(prev_row) > 0 else ""
+                
+                # Combine the texts
+                combined_text = f"{prev_text} {current_text}".strip()
+                prev_row.iloc[0] = combined_text
+                final_rows.append(prev_row)
+                
+                if debug:
+                    print(f"MERGING LONG ROWS: Merged up row {i} into previous: {combined_text}")
+            else:
+                # No previous row to merge with, keep as is
+                final_rows.append(current_row)
+        else:
+            # This row should not be merged up, keep as is
+            final_rows.append(current_row)
+        
+        i += 1
+    
+    if debug:
+        print("MERGING LONG ROWS: After merging:")
+        for idx, row in enumerate(final_rows):
+            desc = row.iloc[0]
+            desc_clean = str(desc).replace('\n', ' ').replace('\r', ' ').strip()
+            word_count = len(desc_clean.split())
+            values = [repr(row.iloc[i]) for i in range(1, len(row))]
+            print(f"Row {idx}:")
+            print(f"  Raw desc: {repr(desc)}")
+            print(f"  Clean desc: {repr(desc_clean)}")
+            print(f"  Word count: {word_count}")
+            print(f"  Values: {values}")
+
+    if final_rows:
+        result_df = pd.DataFrame(final_rows)
+        if debug:
+            print("MERGING LONG ROWS: Final shape:", result_df.shape)
+        return result_df
+    
+    return camelot_df
+
+
+def clean_camelot_dataframe(camelot_df, debug=False, word_tolerance=15):
     """
     Clean camelot DataFrame by:
-    1. Removing columns with only "..." or "$"
-    2. Merging text columns into one column
-    3. Keeping only meaningful data columns
-    4. Only keeping rows where columns 2 and 3 have numbers in them
+    1. Merging rows with word_tolerance+ words in description
+    2. Merging up short, lowercase descriptions
+    3. Removing columns with only "..." or "$"
+    4. Merging text columns into one column
+    5. Keeping only meaningful data columns
+    6. Only keeping rows where columns 2 and 3 have numbers in them
     """
     if camelot_df is None or camelot_df.empty:
         return camelot_df
     
     if debug:
         print("CLEANING: Original camelot shape:", camelot_df.shape)
+    
+    # First, merge rows with long descriptions
+    camelot_df = merge_long_rows(camelot_df, debug, word_tolerance)
+    
+    if debug:
+        print("CLEANING: After merging long rows:", camelot_df.shape)
     
     # Remove columns that contain only "..." or "$"
     columns_to_keep = []
@@ -718,134 +999,201 @@ def extract_table_to_excel(pdf_path, output_path, method, debug=False):
     """
     excel_path = output_path / "extracted_table.xlsx"
     
-    # First, try to extract header information
+    # First, try to extract header information using original logic
     header_years = extract_header_info(pdf_path, debug)
     if header_years:
         click.echo(f"📅 Found year headers: {header_years}")
     else:
         click.echo("⚠️  No year headers found, using default column names")
     
-    # Always try both pdfplumber and camelot
-    pdfplumber_df = None
-    camelot_df = None
+    # Use hybrid approach: camelot for table rows
+    table_df = extract_table_hybrid(pdf_path, debug=debug)
     
-    # Try pdfplumber first
-    try:
-        click.echo(f"Trying table extraction with pdfplumber...")
-        with pdfplumber.open(pdf_path) as pdf:
-            all_tables = []
-            for page in pdf.pages:
-                tables = page.extract_tables()
-                if debug:
-                    for t_idx, table in enumerate(tables):
-                        print(f"PDFPLUMBER DEBUG: TABLE {t_idx}")
-                        for row in table:
-                            print(f"PDFPLUMBER DEBUG: ROW: {row}")
-                if tables:
-                    for table in tables:
-                        if table and len(table) > 1:
-                            df = pd.DataFrame(table[1:], columns=table[0])
-                            if df.columns.duplicated().any():
-                                df.columns = [f"{col}_{i}" if df.columns.duplicated()[i] else col for i, col in enumerate(df.columns)]
-                            df = df.replace('', pd.NA).dropna(how='all')
-                            all_tables.append(df)
-            if all_tables:
-                combined_df = pd.concat(all_tables, ignore_index=True)
-                pdfplumber_df = process_table_data(combined_df, debug)
-                click.echo(f"📊 Extracted and processed {len(all_tables)} tables using pdfplumber")
-            else:
-                click.echo("⚠️  No tables found using pdfplumber")
-    except Exception as e:
-        click.echo(f"❌ Error with pdfplumber: {e}")
-    
-    # Try camelot
-    try:
-        click.echo(f"Trying table extraction with camelot...")
-        camelot_df = extract_best_camelot_table(pdf_path, page_num=1, debug=debug)
-        if camelot_df is not None:
-            camelot_df = process_table_data(camelot_df, debug)
-            click.echo(f"📊 Extracted and processed table using camelot")
-        else:
-            click.echo("⚠️  No valid tables found using camelot")
-    except Exception as e:
-        click.echo(f"❌ Error with camelot: {e}")
-    
-    # Merge results
-    if pdfplumber_df is not None or camelot_df is not None:
-        merged_df = merge_extraction_results(pdfplumber_df, camelot_df, debug=debug)
-        
+    if table_df is not None and not table_df.empty:
         # Update column names if we found year headers
-        if header_years and len(header_years) >= len(merged_df.columns) - 1:
-            new_columns = ['Description'] + header_years[:len(merged_df.columns) - 1]
-            merged_df.columns = new_columns
+        if header_years and len(header_years) >= len(table_df.columns) - 1:
+            new_columns = ['Description'] + header_years[:len(table_df.columns) - 1]
+            table_df.columns = new_columns
         
-        merged_df.to_excel(excel_path, index=False)
-        click.echo(f"📊 Merged extraction results saved to Excel")
+        table_df.to_excel(excel_path, index=False)
+        click.echo(f"📊 Hybrid extraction results saved to Excel")
         return excel_path
     
     click.echo("❌ All table extraction methods failed")
     return None
 
 
+def extract_table_hybrid(pdf_path, debug=False):
+    """
+    Hybrid approach: Use camelot for table rows and original header logic.
+    Returns a DataFrame with combined results.
+    """
+    # Extract table rows with camelot
+    rows_df = extract_table_rows_with_camelot(pdf_path, debug)
+    
+    if rows_df is not None and not rows_df.empty:
+        # Remove entirely empty columns
+        if debug:
+            print(f"HYBRID: Original shape: {rows_df.shape}")
+        
+        # Find columns that are entirely empty or contain only empty strings/None
+        columns_to_keep = []
+        for col_idx, col_name in enumerate(rows_df.columns):
+            col_values = rows_df.iloc[:, col_idx]
+            # Check if column has any non-empty, non-None values
+            has_meaningful_data = False
+            for val in col_values:
+                if pd.notna(val) and str(val).strip() and str(val).strip() != 'None':
+                    has_meaningful_data = True
+                    break
+            
+            if has_meaningful_data:
+                columns_to_keep.append(col_idx)
+            else:
+                if debug:
+                    print(f"HYBRID: Removing empty column {col_idx} ({col_name})")
+        
+        if columns_to_keep:
+            rows_df = rows_df.iloc[:, columns_to_keep]
+            if debug:
+                print(f"HYBRID: After removing empty columns: {rows_df.shape}")
+        else:
+            if debug:
+                print("HYBRID: No meaningful columns found after filtering")
+            return pd.DataFrame()
+        
+        # Filter out rows with parenthetical descriptions
+        if len(rows_df.columns) > 0:
+            description_col = rows_df.columns[0]  # First column is typically description
+            rows_to_keep = []
+            
+            for idx, row in rows_df.iterrows():
+                description = str(row[description_col]).strip()
+                
+                # Skip if description is empty
+                if not description or description == 'nan':
+                    continue
+                
+                # Skip if description starts with ( and ends with )
+                if description.startswith('(') and description.endswith(')'):
+                    if debug:
+                        print(f"HYBRID: Removing parenthetical row: {description}")
+                    continue
+                
+                # Skip if description contains "consolidated statement" or "consolidated statements"
+                description_lower = description.lower()
+                if 'consolidated statement' in description_lower:
+                    if debug:
+                        print(f"HYBRID: Removing consolidated statement row: {description}")
+                    continue
+                
+                rows_to_keep.append(idx)
+            
+            if rows_to_keep:
+                rows_df = rows_df.iloc[rows_to_keep].reset_index(drop=True)
+                if debug:
+                    print(f"HYBRID: After filtering parenthetical rows: {rows_df.shape}")
+            else:
+                if debug:
+                    print("HYBRID: No rows remaining after filtering")
+                return pd.DataFrame()
+        
+        return rows_df
+    else:
+        # Fallback to pdfplumber if camelot fails
+        if debug:
+            print("HYBRID: Camelot failed, falling back to pdfplumber")
+        try:
+            click.echo(f"Falling back to pdfplumber for table extraction...")
+            with pdfplumber.open(pdf_path) as pdf:
+                all_tables = []
+                for page in pdf.pages:
+                    tables = page.extract_tables()
+                    if tables:
+                        for table in tables:
+                            if table and len(table) > 1:
+                                df = pd.DataFrame(table[1:], columns=table[0])
+                                if df.columns.duplicated().any():
+                                    df.columns = [f"{col}_{i}" if df.columns.duplicated()[i] else col for i, col in enumerate(df.columns)]
+                                df = df.replace('', pd.NA).dropna(how='all')
+                                all_tables.append(df)
+                if all_tables:
+                    combined_df = pd.concat(all_tables, ignore_index=True)
+                    pdfplumber_df = process_table_data(combined_df, debug)
+                    click.echo(f"📊 Fallback: Extracted and processed {len(all_tables)} tables using pdfplumber")
+                    return pdfplumber_df
+        except Exception as e:
+            click.echo(f"❌ Error with pdfplumber fallback: {e}")
+    
+    return None
+
+
 def extract_table_from_page(pdf_path, statement_name, debug=False):
+    # Extract header information using original logic
     header_years = extract_header_info(pdf_path, debug)
     if header_years:
         click.echo(f"📅 Found year headers: {header_years}")
     else:
         click.echo("⚠️  No year headers found, using default column names")
     if debug:
-        print("\n=== DEBUG: Trying all table extractors on first page ===")
-        try_all_table_extractors(pdf_path, page_num=1, debug=debug)
+        print("\n=== DEBUG: Trying hybrid table extraction ===")
     
-    # Always try both pdfplumber and camelot
-    pdfplumber_df = None
-    camelot_df = None
+    # Use hybrid approach: camelot for table rows
+    table_df = extract_table_hybrid(pdf_path, debug=debug)
     
-    # Try pdfplumber first
-    try:
-        click.echo(f"Trying table extraction with pdfplumber...")
-        with pdfplumber.open(pdf_path) as pdf:
-            all_tables = []
-            for page in pdf.pages:
-                tables = page.extract_tables()
-                if debug:
-                    for t_idx, table in enumerate(tables):
-                        print(f"PDFPLUMBER DEBUG: TABLE {t_idx}")
-                        for row in table:
-                            print(f"PDFPLUMBER DEBUG: ROW: {row}")
-                if tables:
-                    for table in tables:
-                        if table and len(table) > 1:
-                            df = pd.DataFrame(table[1:], columns=table[0])
-                            if df.columns.duplicated().any():
-                                df.columns = [f"{col}_{i}" if df.columns.duplicated()[i] else col for i, col in enumerate(df.columns)]
-                            df = df.replace('', pd.NA).dropna(how='all')
-                            all_tables.append(df)
-            if all_tables:
-                combined_df = pd.concat(all_tables, ignore_index=True)
-                pdfplumber_df = process_table_data(combined_df, debug=debug)
-    except Exception as e:
-        click.echo(f"❌ Error with pdfplumber: {e}")
-    
-    # Try camelot
-    try:
-        click.echo(f"Trying table extraction with camelot...")
-        camelot_df = extract_best_camelot_table(pdf_path, page_num=1, debug=debug)
-        if camelot_df is not None:
-            camelot_df = process_table_data(camelot_df, debug=debug)
-    except Exception as e:
-        click.echo(f"❌ Error with camelot: {e}")
-    
-    # Merge results
-    if pdfplumber_df is not None or camelot_df is not None:
-        merged_df = merge_extraction_results(pdfplumber_df, camelot_df, debug=debug)
-        
+    if table_df is not None and not table_df.empty:
         # Update column names if we found year headers
-        if header_years and len(header_years) >= len(merged_df.columns) - 1:
-            new_columns = ['Description'] + header_years[:len(merged_df.columns) - 1]
-            merged_df.columns = new_columns
+        if header_years and len(header_years) >= len(table_df.columns) - 1:
+            new_columns = ['Description'] + header_years[:len(table_df.columns) - 1]
+            table_df.columns = new_columns
         
-        return merged_df
+        # Now filter out rows with header matches (after column names are updated)
+        if len(table_df.columns) > 0:
+            description_col = table_df.columns[0]  # First column is typically description
+            rows_to_keep = []
+            
+            for idx, row in table_df.iterrows():
+                description = str(row[description_col]).strip()
+                
+                # Skip if description is empty
+                if not description or description == 'nan':
+                    continue
+                
+                # Check for 50% word match with column headers
+                description_words = set(description.lower().split())
+                header_words = set()
+                for col in table_df.columns:
+                    header_words.update(col.lower().split())
+                
+                if description_words and header_words:
+                    # Calculate word match percentage
+                    common_words = description_words.intersection(header_words)
+                    match_percentage = len(common_words) / len(description_words)
+                    
+                    if match_percentage >= 0.5:
+                        if debug:
+                            print(f"HEADER MATCH: Removing header match row ({match_percentage:.1%}): {description}")
+                        continue
+                
+                # Skip if description contains "consolidated statement" or "consolidated statements"
+                description_lower = description.lower()
+                if 'consolidated statement' in description_lower:
+                    if debug:
+                        print(f"HEADER MATCH: Removing consolidated statement row: {description}")
+                    continue
+                
+                rows_to_keep.append(idx)
+            
+            if rows_to_keep:
+                table_df = table_df.iloc[rows_to_keep].reset_index(drop=True)
+                if debug:
+                    print(f"HEADER MATCH: After filtering header matches: {table_df.shape}")
+            else:
+                if debug:
+                    print("HEADER MATCH: No rows remaining after filtering")
+                return pd.DataFrame()
+        
+        return table_df
     
     return None
 
@@ -1005,6 +1353,68 @@ def extract_all_statements_to_json(pdf_path, output_path, pdf_name):
     click.echo(f"\n🎉 Successfully extracted {len(extracted_statements)} statements")
     click.echo(f"📁 Excel file created locally: {excel_path}")
     return json.dumps(result)
+
+
+def extract_headers_with_pdfplumber(pdf_path, debug=False):
+    """
+    Extract table headers using pdfplumber.
+    Returns a DataFrame with just the header information.
+    """
+    try:
+        click.echo(f"Extracting headers with pdfplumber...")
+        with pdfplumber.open(pdf_path) as pdf:
+            all_headers = []
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                if debug:
+                    for t_idx, table in enumerate(tables):
+                        print(f"PDFPLUMBER HEADERS DEBUG: TABLE {t_idx}")
+                        if table and len(table) > 0:
+                            print(f"PDFPLUMBER HEADERS DEBUG: HEADER ROW: {table[0]}")
+                if tables:
+                    for table in tables:
+                        if table and len(table) > 0:
+                            # Take just the header row (first row)
+                            header_df = pd.DataFrame([table[0]], columns=table[0])
+                            if header_df.columns.duplicated().any():
+                                header_df.columns = [f"{col}_{i}" if header_df.columns.duplicated()[i] else col for i, col in enumerate(header_df.columns)]
+                            all_headers.append(header_df)
+            if all_headers:
+                combined_headers = pd.concat(all_headers, ignore_index=True)
+                click.echo(f"📊 Extracted headers using pdfplumber")
+                return combined_headers
+            else:
+                click.echo("⚠️  No headers found using pdfplumber")
+                return None
+    except Exception as e:
+        click.echo(f"❌ Error extracting headers with pdfplumber: {e}")
+        return None
+
+
+def extract_table_rows_with_camelot(pdf_path, debug=False):
+    """
+    Extract table rows using camelot as the primary method.
+    Returns a DataFrame with the table data.
+    """
+    try:
+        click.echo(f"Extracting table rows with camelot...")
+        camelot_df = extract_best_camelot_table(pdf_path, page_num=1, debug=debug)
+        if camelot_df is not None:
+            # Apply merging logic BEFORE process_table_data to merge split rows
+            if debug:
+                print("CAMELOT: Applying merging logic before processing...")
+            camelot_df = merge_long_rows(camelot_df, debug=debug)
+            
+            # Now process the merged data
+            camelot_df = process_table_data(camelot_df, debug)
+            click.echo(f"📊 Extracted and processed table rows using camelot")
+            return camelot_df
+        else:
+            click.echo("⚠️  No valid tables found using camelot")
+            return None
+    except Exception as e:
+        click.echo(f"❌ Error with camelot: {e}")
+        return None
 
 
 if __name__ == '__main__':
