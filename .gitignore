@@ -139,6 +139,7 @@ gradle-app.setting
 uploads/
 output/
 test_output/
+documents/
 *.pdf
 !documents/*.pdf
 *.xlsx

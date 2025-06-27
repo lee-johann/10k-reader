@@ -54,45 +54,39 @@ public class PdfProcessingService {
         try {
             // Run Python script to extract all statements
             ProcessBuilder processBuilder = new ProcessBuilder(
-                "python3", "pdf_processor.py", "documents/" + filename, OUTPUT_DIR, filename.replace(".pdf", "")
-            );
+                    "python3", "pdf_processor.py", "documents/" + filename, OUTPUT_DIR, filename.replace(".pdf", ""));
             processBuilder.directory(new File(".."));
-            
+
             Process process = processBuilder.start();
-            
+
             // Capture stdout (JSON) and stderr (log messages) separately
             BufferedReader stdoutReader = new BufferedReader(new InputStreamReader(process.getInputStream()));
             BufferedReader stderrReader = new BufferedReader(new InputStreamReader(process.getErrorStream()));
-            
+
             StringBuilder jsonOutput = new StringBuilder();
             StringBuilder logOutput = new StringBuilder();
-            
+
             // Read stdout (JSON data)
             String line;
             while ((line = stdoutReader.readLine()) != null) {
                 jsonOutput.append(line).append("\n");
             }
-            
+
             // Read stderr (log messages) - just for logging, not for parsing
             while ((line = stderrReader.readLine()) != null) {
                 logOutput.append(line).append("\n");
             }
-            
+
             int exitCode = process.waitFor();
-            
+
             if (exitCode != 0) {
                 return new ProcessingResult(null, null, "Python script failed: " + logOutput.toString(), false);
             }
 
             // Parse JSON response from Python script (stdout only)
-            List<ProcessingResult.StatementData> statements = parseJsonFromOutput(jsonOutput.toString());
-            
-            return new ProcessingResult(
-                null,
-                statements,
-                "Processing completed successfully",
-                true
-            );
+            ProcessingResult result = parseJsonFromOutput(jsonOutput.toString());
+
+            return result;
 
         } catch (Exception e) {
             return new ProcessingResult(null, null, "Error processing PDF: " + e.getMessage(), false);
@@ -114,45 +108,43 @@ public class PdfProcessingService {
         try {
             // Run Python script to extract all statements
             ProcessBuilder processBuilder = new ProcessBuilder(
-                "python3", "pdf_processor.py", uploadPath.toString(), OUTPUT_DIR, originalFilename.replace(".pdf", "")
-            );
+                    "python3", "pdf_processor.py", uploadPath.toString(), OUTPUT_DIR,
+                    originalFilename.replace(".pdf", ""));
             processBuilder.directory(new File(".."));
-            
+
             Process process = processBuilder.start();
-            
+
             // Capture stdout (JSON) and stderr (log messages) separately
             BufferedReader stdoutReader = new BufferedReader(new InputStreamReader(process.getInputStream()));
             BufferedReader stderrReader = new BufferedReader(new InputStreamReader(process.getErrorStream()));
-            
+
             StringBuilder jsonOutput = new StringBuilder();
             StringBuilder logOutput = new StringBuilder();
-            
+
             // Read stdout (JSON data)
             String line;
             while ((line = stdoutReader.readLine()) != null) {
                 jsonOutput.append(line).append("\n");
             }
-            
+
             // Read stderr (log messages) - just for logging, not for parsing
             while ((line = stderrReader.readLine()) != null) {
                 logOutput.append(line).append("\n");
             }
-            
+
             int exitCode = process.waitFor();
-            
+
             if (exitCode != 0) {
                 return new ProcessingResult(null, null, "Python script failed: " + logOutput.toString(), false);
             }
 
             // Parse JSON response from Python script (stdout only)
-            List<ProcessingResult.StatementData> statements = parseJsonFromOutput(jsonOutput.toString());
-            
-            return new ProcessingResult(
-                "/uploads/" + savedFilename,
-                statements,
-                "Processing completed successfully",
-                true
-            );
+            ProcessingResult result = parseJsonFromOutput(jsonOutput.toString());
+
+            // Set the PDF URL for uploaded files
+            result.setPdfUrl("/uploads/" + savedFilename);
+
+            return result;
 
         } catch (Exception e) {
             return new ProcessingResult(null, null, "Error processing PDF: " + e.getMessage(), false);
@@ -163,45 +155,163 @@ public class PdfProcessingService {
         Files.createDirectories(Paths.get(OUTPUT_DIR));
     }
 
-    private List<ProcessingResult.StatementData> parseJsonFromOutput(String jsonOutput) throws IOException {
+    private ProcessingResult parseJsonFromOutput(String jsonOutput) throws IOException {
         List<ProcessingResult.StatementData> statements = new ArrayList<>();
-        
+        ProcessingResult.ValidationData validationData = null;
+
         try {
             // Parse the JSON response
-            Map<String, Object> jsonResponse = objectMapper.readValue(jsonOutput, new TypeReference<Map<String, Object>>() {});
-            
+            Map<String, Object> jsonResponse = objectMapper.readValue(jsonOutput,
+                    new TypeReference<Map<String, Object>>() {
+                    });
+
             @SuppressWarnings("unchecked")
             List<Map<String, Object>> statementsList = (List<Map<String, Object>>) jsonResponse.get("statements");
-            
+
             if (statementsList != null) {
                 for (Map<String, Object> statementData : statementsList) {
                     String name = (String) statementData.get("name");
-                    Integer pageNumber = (Integer) statementData.get("pageNumber");
-                    
+                    // Handle pageNumber as either Integer or String
+                    Integer pageNumber;
+                    Object pageNumberObj = statementData.get("pageNumber");
+                    if (pageNumberObj instanceof Integer) {
+                        pageNumber = (Integer) pageNumberObj;
+                    } else if (pageNumberObj instanceof String) {
+                        pageNumber = Integer.parseInt((String) pageNumberObj);
+                    } else {
+                        pageNumber = 0; // Default fallback
+                    }
+
                     @SuppressWarnings("unchecked")
                     List<String> headers = (List<String>) statementData.get("headers");
-                    
+
                     @SuppressWarnings("unchecked")
-                    List<Map<String, Object>> tableDataList = (List<Map<String, Object>>) statementData.get("tableData");
-                    
+                    List<Map<String, Object>> tableDataList = (List<Map<String, Object>>) statementData
+                            .get("tableData");
+
                     List<Map<String, String>> tableData = new ArrayList<>();
                     if (tableDataList != null) {
                         for (Map<String, Object> row : tableDataList) {
                             Map<String, String> stringRow = new HashMap<>();
                             for (Map.Entry<String, Object> entry : row.entrySet()) {
-                                stringRow.put(entry.getKey(), entry.getValue() != null ? entry.getValue().toString() : "");
+                                stringRow.put(entry.getKey(),
+                                        entry.getValue() != null ? entry.getValue().toString() : "");
                             }
                             tableData.add(stringRow);
                         }
                     }
-                    
+
                     statements.add(new ProcessingResult.StatementData(name, pageNumber, tableData, headers));
                 }
             }
+
+            // Parse validation data
+            @SuppressWarnings("unchecked")
+            Map<String, Object> validationMap = (Map<String, Object>) jsonResponse.get("validation");
+
+            if (validationMap != null) {
+                validationData = parseValidationData(validationMap);
+            }
+
         } catch (Exception e) {
             throw new IOException("Failed to parse JSON response: " + e.getMessage(), e);
         }
-        
-        return statements;
+
+        return new ProcessingResult(null, statements, "Processing completed successfully", true, validationData);
     }
-} 
+
+    private ProcessingResult.ValidationData parseValidationData(Map<String, Object> validationMap) {
+        // Parse checklist results
+        @SuppressWarnings("unchecked")
+        Map<String, Object> checklistResultsMap = (Map<String, Object>) validationMap.get("checklist_results");
+        Map<String, Boolean> checklistResults = new HashMap<>();
+
+        if (checklistResultsMap != null) {
+            for (Map.Entry<String, Object> entry : checklistResultsMap.entrySet()) {
+                checklistResults.put(entry.getKey(), (Boolean) entry.getValue());
+            }
+        }
+
+        // Parse summary
+        @SuppressWarnings("unchecked")
+        Map<String, Object> summaryMap = (Map<String, Object>) validationMap.get("summary");
+        ProcessingResult.ValidationSummary summary = null;
+
+        if (summaryMap != null) {
+            // Handle numeric values that might be Integer, Double, or String
+            int totalChecks = getIntValue(summaryMap.get("total_checks"));
+            int passedChecks = getIntValue(summaryMap.get("passed_checks"));
+            int failedChecks = getIntValue(summaryMap.get("failed_checks"));
+            double passRate = getDoubleValue(summaryMap.get("pass_rate"));
+
+            summary = new ProcessingResult.ValidationSummary(totalChecks, passedChecks, failedChecks, passRate);
+        }
+
+        // Parse balance sheet totals
+        @SuppressWarnings("unchecked")
+        Map<String, Object> balanceSheetTotalsMap = (Map<String, Object>) validationMap.get("balance_sheet_totals");
+        ProcessingResult.BalanceSheetTotals balanceSheetTotals = null;
+
+        if (balanceSheetTotalsMap != null) {
+            ProcessingResult.TotalData assets = null;
+            ProcessingResult.TotalData liabilitiesEquity = null;
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> assetsMap = (Map<String, Object>) balanceSheetTotalsMap.get("assets");
+            if (assetsMap != null) {
+                assets = new ProcessingResult.TotalData(
+                        getDoubleValue(assetsMap.get("calculated")),
+                        getDoubleValue(assetsMap.get("reported")),
+                        getDoubleValue(assetsMap.get("difference")),
+                        (Boolean) assetsMap.get("matches"));
+            }
+
+            @SuppressWarnings("unchecked")
+            Map<String, Object> liabilitiesEquityMap = (Map<String, Object>) balanceSheetTotalsMap
+                    .get("liabilities_equity");
+            if (liabilitiesEquityMap != null) {
+                liabilitiesEquity = new ProcessingResult.TotalData(
+                        getDoubleValue(liabilitiesEquityMap.get("calculated")),
+                        getDoubleValue(liabilitiesEquityMap.get("reported")),
+                        getDoubleValue(liabilitiesEquityMap.get("difference")),
+                        (Boolean) liabilitiesEquityMap.get("matches"));
+            }
+
+            balanceSheetTotals = new ProcessingResult.BalanceSheetTotals(assets, liabilitiesEquity);
+        }
+
+        return new ProcessingResult.ValidationData(checklistResults, summary, balanceSheetTotals);
+    }
+
+    // Helper method to safely convert Object to int
+    private int getIntValue(Object value) {
+        if (value instanceof Integer) {
+            return (Integer) value;
+        } else if (value instanceof Double) {
+            return ((Double) value).intValue();
+        } else if (value instanceof String) {
+            try {
+                return Integer.parseInt((String) value);
+            } catch (NumberFormatException e) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    // Helper method to safely convert Object to double
+    private double getDoubleValue(Object value) {
+        if (value instanceof Double) {
+            return (Double) value;
+        } else if (value instanceof Integer) {
+            return ((Integer) value).doubleValue();
+        } else if (value instanceof String) {
+            try {
+                return Double.parseDouble((String) value);
+            } catch (NumberFormatException e) {
+                return 0.0;
+            }
+        }
+        return 0.0;
+    }
+}

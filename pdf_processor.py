@@ -34,6 +34,9 @@ if sys.platform == "darwin":
 import camelot
 import openpyxl
 
+# Import the validation module
+from table_validation import validate_financial_statements
+
 
 class ConsoleOutputRedirector:
     """
@@ -285,10 +288,15 @@ def process_table_data(df, debug=False):
         # Process rows with numbers as before
         number_parts = []
         i = len(parts) - 1
+        dash_values = {"—", "-", "--", "–", "―"}
         while i >= 0:
             part = parts[i]
             is_number = False
             is_bracketed_number = False
+            if part in dash_values:
+                number_parts.insert(0, "")  # Treat dash as empty value
+                i -= 1
+                continue
             if part.startswith('(') and part.endswith(')') and len(part) > 2:
                 bracket_content = part[1:-1]
                 if re.match(r'^[\d,]+$', bracket_content):
@@ -1312,7 +1320,12 @@ def extract_all_statements_to_json(pdf_path, output_path, pdf_name):
                     row_dict = {}
                     for col in table_df.columns:
                         value = row[col]
-                        if pd.isna(value):
+                        # If value is a Series (ambiguous), convert to string
+                        if isinstance(value, pd.Series):
+                            value = value.astype(str).to_list()
+                            value = ", ".join(value)
+                        # Now handle missing or scalar values
+                        if value is None or (isinstance(value, float) and pd.isna(value)):
                             row_dict[col] = ""
                         else:
                             row_dict[col] = str(value)
@@ -1342,12 +1355,29 @@ def extract_all_statements_to_json(pdf_path, output_path, pdf_name):
         click.echo("❌ No statements were successfully extracted")
         return None
     
+    # Perform validation checks on the extracted statements
+    try:
+        click.echo(f"🔍 Starting validation with {len(extracted_statements)} statements")
+        validation_results = validate_financial_statements(extracted_statements)
+        click.echo(f"✅ Validation completed: {validation_results['summary']['passed_checks']}/{validation_results['summary']['total_checks']} checks passed ({validation_results['summary']['pass_rate']}%)")
+        click.echo(f"🔍 Validation results: {validation_results}")
+    except Exception as e:
+        click.echo(f"⚠️  Validation failed: {e}")
+        import traceback
+        click.echo(f"⚠️  Validation error details: {traceback.format_exc()}")
+        validation_results = {
+            'checklist_results': {},
+            'summary': {'total_checks': 0, 'passed_checks': 0, 'failed_checks': 0, 'pass_rate': 0},
+            'balance_sheet_totals': None
+        }
+    
     # Return JSON string
     result = {
         "pdfName": pdf_name,
         "statements": extracted_statements,
         "extractedCount": len(extracted_statements),
-        "excelPath": str(excel_path)
+        "excelPath": str(excel_path),
+        "validation": validation_results
     }
     
     click.echo(f"\n🎉 Successfully extracted {len(extracted_statements)} statements")
