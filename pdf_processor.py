@@ -1315,7 +1315,12 @@ def extract_all_statements_to_json(pdf_path, output_path, pdf_name):
                     row_dict = {}
                     for col in table_df.columns:
                         value = row[col]
-                        if pd.isna(value):
+                        # If value is a Series (ambiguous), convert to string
+                        if isinstance(value, pd.Series):
+                            value = value.astype(str).to_list()
+                            value = ", ".join(value)
+                        # Now handle missing or scalar values
+                        if value is None or (isinstance(value, float) and pd.isna(value)):
                             row_dict[col] = ""
                         else:
                             row_dict[col] = str(value)

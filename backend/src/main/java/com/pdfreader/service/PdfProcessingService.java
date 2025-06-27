@@ -171,7 +171,16 @@ public class PdfProcessingService {
             if (statementsList != null) {
                 for (Map<String, Object> statementData : statementsList) {
                     String name = (String) statementData.get("name");
-                    Integer pageNumber = (Integer) statementData.get("pageNumber");
+                    // Handle pageNumber as either Integer or String
+                    Integer pageNumber;
+                    Object pageNumberObj = statementData.get("pageNumber");
+                    if (pageNumberObj instanceof Integer) {
+                        pageNumber = (Integer) pageNumberObj;
+                    } else if (pageNumberObj instanceof String) {
+                        pageNumber = Integer.parseInt((String) pageNumberObj);
+                    } else {
+                        pageNumber = 0; // Default fallback
+                    }
 
                     @SuppressWarnings("unchecked")
                     List<String> headers = (List<String>) statementData.get("headers");
@@ -229,11 +238,13 @@ public class PdfProcessingService {
         ProcessingResult.ValidationSummary summary = null;
 
         if (summaryMap != null) {
-            summary = new ProcessingResult.ValidationSummary(
-                    ((Number) summaryMap.get("total_checks")).intValue(),
-                    ((Number) summaryMap.get("passed_checks")).intValue(),
-                    ((Number) summaryMap.get("failed_checks")).intValue(),
-                    ((Number) summaryMap.get("pass_rate")).doubleValue());
+            // Handle numeric values that might be Integer, Double, or String
+            int totalChecks = getIntValue(summaryMap.get("total_checks"));
+            int passedChecks = getIntValue(summaryMap.get("passed_checks"));
+            int failedChecks = getIntValue(summaryMap.get("failed_checks"));
+            double passRate = getDoubleValue(summaryMap.get("pass_rate"));
+
+            summary = new ProcessingResult.ValidationSummary(totalChecks, passedChecks, failedChecks, passRate);
         }
 
         // Parse balance sheet totals
@@ -249,9 +260,9 @@ public class PdfProcessingService {
             Map<String, Object> assetsMap = (Map<String, Object>) balanceSheetTotalsMap.get("assets");
             if (assetsMap != null) {
                 assets = new ProcessingResult.TotalData(
-                        ((Number) assetsMap.get("calculated")).doubleValue(),
-                        ((Number) assetsMap.get("reported")).doubleValue(),
-                        ((Number) assetsMap.get("difference")).doubleValue(),
+                        getDoubleValue(assetsMap.get("calculated")),
+                        getDoubleValue(assetsMap.get("reported")),
+                        getDoubleValue(assetsMap.get("difference")),
                         (Boolean) assetsMap.get("matches"));
             }
 
@@ -260,9 +271,9 @@ public class PdfProcessingService {
                     .get("liabilities_equity");
             if (liabilitiesEquityMap != null) {
                 liabilitiesEquity = new ProcessingResult.TotalData(
-                        ((Number) liabilitiesEquityMap.get("calculated")).doubleValue(),
-                        ((Number) liabilitiesEquityMap.get("reported")).doubleValue(),
-                        ((Number) liabilitiesEquityMap.get("difference")).doubleValue(),
+                        getDoubleValue(liabilitiesEquityMap.get("calculated")),
+                        getDoubleValue(liabilitiesEquityMap.get("reported")),
+                        getDoubleValue(liabilitiesEquityMap.get("difference")),
                         (Boolean) liabilitiesEquityMap.get("matches"));
             }
 
@@ -270,5 +281,37 @@ public class PdfProcessingService {
         }
 
         return new ProcessingResult.ValidationData(checklistResults, summary, balanceSheetTotals);
+    }
+
+    // Helper method to safely convert Object to int
+    private int getIntValue(Object value) {
+        if (value instanceof Integer) {
+            return (Integer) value;
+        } else if (value instanceof Double) {
+            return ((Double) value).intValue();
+        } else if (value instanceof String) {
+            try {
+                return Integer.parseInt((String) value);
+            } catch (NumberFormatException e) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    // Helper method to safely convert Object to double
+    private double getDoubleValue(Object value) {
+        if (value instanceof Double) {
+            return (Double) value;
+        } else if (value instanceof Integer) {
+            return ((Integer) value).doubleValue();
+        } else if (value instanceof String) {
+            try {
+                return Double.parseDouble((String) value);
+            } catch (NumberFormatException e) {
+                return 0.0;
+            }
+        }
+        return 0.0;
     }
 }
