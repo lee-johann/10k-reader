@@ -288,10 +288,15 @@ def process_table_data(df, debug=False):
         # Process rows with numbers as before
         number_parts = []
         i = len(parts) - 1
+        dash_values = {"—", "-", "--", "–", "―"}
         while i >= 0:
             part = parts[i]
             is_number = False
             is_bracketed_number = False
+            if part in dash_values:
+                number_parts.insert(0, "")  # Treat dash as empty value
+                i -= 1
+                continue
             if part.startswith('(') and part.endswith(')') and len(part) > 2:
                 bracket_content = part[1:-1]
                 if re.match(r'^[\d,]+$', bracket_content):
