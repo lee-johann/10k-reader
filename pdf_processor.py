@@ -13,13 +13,26 @@ import sys
 import re
 import json
 from pathlib import Path
-import camelot
-import openpyxl
 import functools
 import subprocess
 import signal
 import contextlib
 import io
+
+# Fix for macOS: Set library path for Ghostscript detection
+if sys.platform == "darwin":
+    # Add Homebrew lib path to DYLD_LIBRARY_PATH for Ghostscript detection
+    homebrew_lib = "/opt/homebrew/lib"
+    if os.path.exists(homebrew_lib):
+        current_dyld_path = os.environ.get('DYLD_LIBRARY_PATH', '')
+        if homebrew_lib not in current_dyld_path:
+            if current_dyld_path:
+                os.environ['DYLD_LIBRARY_PATH'] = f"{homebrew_lib}:{current_dyld_path}"
+            else:
+                os.environ['DYLD_LIBRARY_PATH'] = homebrew_lib
+
+import camelot
+import openpyxl
 
 
 class ConsoleOutputRedirector:
@@ -424,7 +437,7 @@ def extract_best_camelot_table(pdf_path, page_num=1, debug=False):
     max_rows = 0
     best_df = None
     try:
-        tables = camelot.read_pdf(str(pdf_path), pages=str(page_num), flavor="stream")
+        tables = camelot.read_pdf(str(pdf_path), pages=str(page_num), flavor="stream", edge_tol=100)
         for i, table in enumerate(tables):
             nrows = table.df.shape[0]
             if debug:
@@ -718,134 +731,201 @@ def extract_table_to_excel(pdf_path, output_path, method, debug=False):
     """
     excel_path = output_path / "extracted_table.xlsx"
     
-    # First, try to extract header information
+    # First, try to extract header information using original logic
     header_years = extract_header_info(pdf_path, debug)
     if header_years:
         click.echo(f"📅 Found year headers: {header_years}")
     else:
         click.echo("⚠️  No year headers found, using default column names")
     
-    # Always try both pdfplumber and camelot
-    pdfplumber_df = None
-    camelot_df = None
+    # Use hybrid approach: camelot for table rows
+    table_df = extract_table_hybrid(pdf_path, debug=debug)
     
-    # Try pdfplumber first
-    try:
-        click.echo(f"Trying table extraction with pdfplumber...")
-        with pdfplumber.open(pdf_path) as pdf:
-            all_tables = []
-            for page in pdf.pages:
-                tables = page.extract_tables()
-                if debug:
-                    for t_idx, table in enumerate(tables):
-                        print(f"PDFPLUMBER DEBUG: TABLE {t_idx}")
-                        for row in table:
-                            print(f"PDFPLUMBER DEBUG: ROW: {row}")
-                if tables:
-                    for table in tables:
-                        if table and len(table) > 1:
-                            df = pd.DataFrame(table[1:], columns=table[0])
-                            if df.columns.duplicated().any():
-                                df.columns = [f"{col}_{i}" if df.columns.duplicated()[i] else col for i, col in enumerate(df.columns)]
-                            df = df.replace('', pd.NA).dropna(how='all')
-                            all_tables.append(df)
-            if all_tables:
-                combined_df = pd.concat(all_tables, ignore_index=True)
-                pdfplumber_df = process_table_data(combined_df, debug)
-                click.echo(f"📊 Extracted and processed {len(all_tables)} tables using pdfplumber")
-            else:
-                click.echo("⚠️  No tables found using pdfplumber")
-    except Exception as e:
-        click.echo(f"❌ Error with pdfplumber: {e}")
-    
-    # Try camelot
-    try:
-        click.echo(f"Trying table extraction with camelot...")
-        camelot_df = extract_best_camelot_table(pdf_path, page_num=1, debug=debug)
-        if camelot_df is not None:
-            camelot_df = process_table_data(camelot_df, debug)
-            click.echo(f"📊 Extracted and processed table using camelot")
-        else:
-            click.echo("⚠️  No valid tables found using camelot")
-    except Exception as e:
-        click.echo(f"❌ Error with camelot: {e}")
-    
-    # Merge results
-    if pdfplumber_df is not None or camelot_df is not None:
-        merged_df = merge_extraction_results(pdfplumber_df, camelot_df, debug=debug)
-        
+    if table_df is not None and not table_df.empty:
         # Update column names if we found year headers
-        if header_years and len(header_years) >= len(merged_df.columns) - 1:
-            new_columns = ['Description'] + header_years[:len(merged_df.columns) - 1]
-            merged_df.columns = new_columns
+        if header_years and len(header_years) >= len(table_df.columns) - 1:
+            new_columns = ['Description'] + header_years[:len(table_df.columns) - 1]
+            table_df.columns = new_columns
         
-        merged_df.to_excel(excel_path, index=False)
-        click.echo(f"📊 Merged extraction results saved to Excel")
+        table_df.to_excel(excel_path, index=False)
+        click.echo(f"📊 Hybrid extraction results saved to Excel")
         return excel_path
     
     click.echo("❌ All table extraction methods failed")
     return None
 
 
+def extract_table_hybrid(pdf_path, debug=False):
+    """
+    Hybrid approach: Use camelot for table rows and original header logic.
+    Returns a DataFrame with combined results.
+    """
+    # Extract table rows with camelot
+    rows_df = extract_table_rows_with_camelot(pdf_path, debug)
+    
+    if rows_df is not None and not rows_df.empty:
+        # Remove entirely empty columns
+        if debug:
+            print(f"HYBRID: Original shape: {rows_df.shape}")
+        
+        # Find columns that are entirely empty or contain only empty strings/None
+        columns_to_keep = []
+        for col_idx, col_name in enumerate(rows_df.columns):
+            col_values = rows_df.iloc[:, col_idx]
+            # Check if column has any non-empty, non-None values
+            has_meaningful_data = False
+            for val in col_values:
+                if pd.notna(val) and str(val).strip() and str(val).strip() != 'None':
+                    has_meaningful_data = True
+                    break
+            
+            if has_meaningful_data:
+                columns_to_keep.append(col_idx)
+            else:
+                if debug:
+                    print(f"HYBRID: Removing empty column {col_idx} ({col_name})")
+        
+        if columns_to_keep:
+            rows_df = rows_df.iloc[:, columns_to_keep]
+            if debug:
+                print(f"HYBRID: After removing empty columns: {rows_df.shape}")
+        else:
+            if debug:
+                print("HYBRID: No meaningful columns found after filtering")
+            return pd.DataFrame()
+        
+        # Filter out rows with parenthetical descriptions
+        if len(rows_df.columns) > 0:
+            description_col = rows_df.columns[0]  # First column is typically description
+            rows_to_keep = []
+            
+            for idx, row in rows_df.iterrows():
+                description = str(row[description_col]).strip()
+                
+                # Skip if description is empty
+                if not description or description == 'nan':
+                    continue
+                
+                # Skip if description starts with ( and ends with )
+                if description.startswith('(') and description.endswith(')'):
+                    if debug:
+                        print(f"HYBRID: Removing parenthetical row: {description}")
+                    continue
+                
+                # Skip if description contains "consolidated statement" or "consolidated statements"
+                description_lower = description.lower()
+                if 'consolidated statement' in description_lower:
+                    if debug:
+                        print(f"HYBRID: Removing consolidated statement row: {description}")
+                    continue
+                
+                rows_to_keep.append(idx)
+            
+            if rows_to_keep:
+                rows_df = rows_df.iloc[rows_to_keep].reset_index(drop=True)
+                if debug:
+                    print(f"HYBRID: After filtering parenthetical rows: {rows_df.shape}")
+            else:
+                if debug:
+                    print("HYBRID: No rows remaining after filtering")
+                return pd.DataFrame()
+        
+        return rows_df
+    else:
+        # Fallback to pdfplumber if camelot fails
+        if debug:
+            print("HYBRID: Camelot failed, falling back to pdfplumber")
+        try:
+            click.echo(f"Falling back to pdfplumber for table extraction...")
+            with pdfplumber.open(pdf_path) as pdf:
+                all_tables = []
+                for page in pdf.pages:
+                    tables = page.extract_tables()
+                    if tables:
+                        for table in tables:
+                            if table and len(table) > 1:
+                                df = pd.DataFrame(table[1:], columns=table[0])
+                                if df.columns.duplicated().any():
+                                    df.columns = [f"{col}_{i}" if df.columns.duplicated()[i] else col for i, col in enumerate(df.columns)]
+                                df = df.replace('', pd.NA).dropna(how='all')
+                                all_tables.append(df)
+                if all_tables:
+                    combined_df = pd.concat(all_tables, ignore_index=True)
+                    pdfplumber_df = process_table_data(combined_df, debug)
+                    click.echo(f"📊 Fallback: Extracted and processed {len(all_tables)} tables using pdfplumber")
+                    return pdfplumber_df
+        except Exception as e:
+            click.echo(f"❌ Error with pdfplumber fallback: {e}")
+    
+    return None
+
+
 def extract_table_from_page(pdf_path, statement_name, debug=False):
+    # Extract header information using original logic
     header_years = extract_header_info(pdf_path, debug)
     if header_years:
         click.echo(f"📅 Found year headers: {header_years}")
     else:
         click.echo("⚠️  No year headers found, using default column names")
     if debug:
-        print("\n=== DEBUG: Trying all table extractors on first page ===")
-        try_all_table_extractors(pdf_path, page_num=1, debug=debug)
+        print("\n=== DEBUG: Trying hybrid table extraction ===")
     
-    # Always try both pdfplumber and camelot
-    pdfplumber_df = None
-    camelot_df = None
+    # Use hybrid approach: camelot for table rows
+    table_df = extract_table_hybrid(pdf_path, debug=debug)
     
-    # Try pdfplumber first
-    try:
-        click.echo(f"Trying table extraction with pdfplumber...")
-        with pdfplumber.open(pdf_path) as pdf:
-            all_tables = []
-            for page in pdf.pages:
-                tables = page.extract_tables()
-                if debug:
-                    for t_idx, table in enumerate(tables):
-                        print(f"PDFPLUMBER DEBUG: TABLE {t_idx}")
-                        for row in table:
-                            print(f"PDFPLUMBER DEBUG: ROW: {row}")
-                if tables:
-                    for table in tables:
-                        if table and len(table) > 1:
-                            df = pd.DataFrame(table[1:], columns=table[0])
-                            if df.columns.duplicated().any():
-                                df.columns = [f"{col}_{i}" if df.columns.duplicated()[i] else col for i, col in enumerate(df.columns)]
-                            df = df.replace('', pd.NA).dropna(how='all')
-                            all_tables.append(df)
-            if all_tables:
-                combined_df = pd.concat(all_tables, ignore_index=True)
-                pdfplumber_df = process_table_data(combined_df, debug=debug)
-    except Exception as e:
-        click.echo(f"❌ Error with pdfplumber: {e}")
-    
-    # Try camelot
-    try:
-        click.echo(f"Trying table extraction with camelot...")
-        camelot_df = extract_best_camelot_table(pdf_path, page_num=1, debug=debug)
-        if camelot_df is not None:
-            camelot_df = process_table_data(camelot_df, debug=debug)
-    except Exception as e:
-        click.echo(f"❌ Error with camelot: {e}")
-    
-    # Merge results
-    if pdfplumber_df is not None or camelot_df is not None:
-        merged_df = merge_extraction_results(pdfplumber_df, camelot_df, debug=debug)
-        
+    if table_df is not None and not table_df.empty:
         # Update column names if we found year headers
-        if header_years and len(header_years) >= len(merged_df.columns) - 1:
-            new_columns = ['Description'] + header_years[:len(merged_df.columns) - 1]
-            merged_df.columns = new_columns
+        if header_years and len(header_years) >= len(table_df.columns) - 1:
+            new_columns = ['Description'] + header_years[:len(table_df.columns) - 1]
+            table_df.columns = new_columns
         
-        return merged_df
+        # Now filter out rows with header matches (after column names are updated)
+        if len(table_df.columns) > 0:
+            description_col = table_df.columns[0]  # First column is typically description
+            rows_to_keep = []
+            
+            for idx, row in table_df.iterrows():
+                description = str(row[description_col]).strip()
+                
+                # Skip if description is empty
+                if not description or description == 'nan':
+                    continue
+                
+                # Check for 50% word match with column headers
+                description_words = set(description.lower().split())
+                header_words = set()
+                for col in table_df.columns:
+                    header_words.update(col.lower().split())
+                
+                if description_words and header_words:
+                    # Calculate word match percentage
+                    common_words = description_words.intersection(header_words)
+                    match_percentage = len(common_words) / len(description_words)
+                    
+                    if match_percentage >= 0.5:
+                        if debug:
+                            print(f"HEADER MATCH: Removing header match row ({match_percentage:.1%}): {description}")
+                        continue
+                
+                # Skip if description contains "consolidated statement" or "consolidated statements"
+                description_lower = description.lower()
+                if 'consolidated statement' in description_lower:
+                    if debug:
+                        print(f"HEADER MATCH: Removing consolidated statement row: {description}")
+                    continue
+                
+                rows_to_keep.append(idx)
+            
+            if rows_to_keep:
+                table_df = table_df.iloc[rows_to_keep].reset_index(drop=True)
+                if debug:
+                    print(f"HEADER MATCH: After filtering header matches: {table_df.shape}")
+            else:
+                if debug:
+                    print("HEADER MATCH: No rows remaining after filtering")
+                return pd.DataFrame()
+        
+        return table_df
     
     return None
 
@@ -1005,6 +1085,62 @@ def extract_all_statements_to_json(pdf_path, output_path, pdf_name):
     click.echo(f"\n🎉 Successfully extracted {len(extracted_statements)} statements")
     click.echo(f"📁 Excel file created locally: {excel_path}")
     return json.dumps(result)
+
+
+def extract_headers_with_pdfplumber(pdf_path, debug=False):
+    """
+    Extract table headers using pdfplumber.
+    Returns a DataFrame with just the header information.
+    """
+    try:
+        click.echo(f"Extracting headers with pdfplumber...")
+        with pdfplumber.open(pdf_path) as pdf:
+            all_headers = []
+            for page in pdf.pages:
+                tables = page.extract_tables()
+                if debug:
+                    for t_idx, table in enumerate(tables):
+                        print(f"PDFPLUMBER HEADERS DEBUG: TABLE {t_idx}")
+                        if table and len(table) > 0:
+                            print(f"PDFPLUMBER HEADERS DEBUG: HEADER ROW: {table[0]}")
+                if tables:
+                    for table in tables:
+                        if table and len(table) > 0:
+                            # Take just the header row (first row)
+                            header_df = pd.DataFrame([table[0]], columns=table[0])
+                            if header_df.columns.duplicated().any():
+                                header_df.columns = [f"{col}_{i}" if header_df.columns.duplicated()[i] else col for i, col in enumerate(header_df.columns)]
+                            all_headers.append(header_df)
+            if all_headers:
+                combined_headers = pd.concat(all_headers, ignore_index=True)
+                click.echo(f"📊 Extracted headers using pdfplumber")
+                return combined_headers
+            else:
+                click.echo("⚠️  No headers found using pdfplumber")
+                return None
+    except Exception as e:
+        click.echo(f"❌ Error extracting headers with pdfplumber: {e}")
+        return None
+
+
+def extract_table_rows_with_camelot(pdf_path, debug=False):
+    """
+    Extract table rows using camelot as the primary method.
+    Returns a DataFrame with the table data.
+    """
+    try:
+        click.echo(f"Extracting table rows with camelot...")
+        camelot_df = extract_best_camelot_table(pdf_path, page_num=1, debug=debug)
+        if camelot_df is not None:
+            camelot_df = process_table_data(camelot_df, debug)
+            click.echo(f"📊 Extracted and processed table rows using camelot")
+            return camelot_df
+        else:
+            click.echo("⚠️  No valid tables found using camelot")
+            return None
+    except Exception as e:
+        click.echo(f"❌ Error with camelot: {e}")
+        return None
 
 
 if __name__ == '__main__':
