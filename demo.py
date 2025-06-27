@@ -5,7 +5,7 @@ Demo script that emphasizes the page number output.
 
 import sys
 from pathlib import Path
-from pdf_processor import find_page_with_text, extract_page, extract_table_to_excel, extract_header_info, process_table_data, extract_all_statements_to_excel
+from pdf_processor import find_page_with_text, extract_page, extract_table_to_excel, extract_header_info, process_table_data, extract_all_statements_to_excel, ConsoleOutputRedirector
 import click
 import pandas as pd
 import tabula
@@ -25,16 +25,21 @@ def run_demo_for_pdf(pdf_path, debug=False):
     print(f"\n{'='*80}\n🔍 PDF Processor Demo for {pdf_path.name}\n{'='*80}")
     output_path = Path("./output")
     output_path.mkdir(exist_ok=True)
-    # Extract all financial statements to different tabs
-    excel_path = extract_all_statements_to_excel(pdf_path, output_path, pdf_path.stem, debug=debug)
-    if excel_path is None:
-        print("❌ Failed to extract any statements")
-        return
-    print(f"\n{'='*60}\n🎉 PROCESSING COMPLETE!\n{'='*60}")
-    print(f"📁 Output directory: {output_path.absolute()}")
-    print(f"📊 Excel file: {excel_path}")
-    print("📋 Contains tabs for: Income, Stockholders_Equity, and Cash_Flows statements")
-    print("=" * 60)
+    
+    # Redirect output to a unique file per PDF
+    pdf_stem = pdf_path.stem.replace('.pdf', '')
+    console_output_path = output_path / f"console_output_{pdf_stem}"
+    with ConsoleOutputRedirector(console_output_path):
+        # Extract all financial statements to different tabs
+        excel_path = extract_all_statements_to_excel(pdf_path, output_path, pdf_path.stem, debug=debug)
+        if excel_path is None:
+            print("❌ Failed to extract any statements")
+            return
+        print(f"\n{'='*60}\n🎉 PROCESSING COMPLETE!\n{'='*60}")
+        print(f"📁 Output directory: {output_path.absolute()}")
+        print(f"📊 Excel file: {excel_path}")
+        print("📋 Contains tabs for: Income, Stockholders_Equity, and Cash_Flows statements")
+        print("=" * 60)
 
 def extract_table_to_excel_custom(pdf_path, output_path, pdf_name, debug=False):
     """
@@ -54,10 +59,11 @@ def extract_table_to_excel_custom(pdf_path, output_path, pdf_name, debug=False):
     return None
 
 def main():
-    pdfs = [
-        Path("documents/goog-10-k-2024.pdf"),
-        Path("documents/goog-10-q-q1-2025.pdf")
-    ]
+    docs_path = Path("documents")
+    pdfs = sorted([p for p in docs_path.glob("*.pdf") if p.is_file()])
+    if not pdfs:
+        print(f"No PDF files found in {docs_path.resolve()}")
+        return
     for pdf_path in pdfs:
         run_demo_for_pdf(pdf_path, debug=DEBUG)
 
