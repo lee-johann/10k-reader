@@ -437,7 +437,7 @@ def extract_best_camelot_table(pdf_path, page_num=1, debug=False):
     max_rows = 0
     best_df = None
     try:
-        tables = camelot.read_pdf(str(pdf_path), pages=str(page_num), flavor="stream", edge_tol=100)
+        tables = camelot.read_pdf(str(pdf_path), pages=str(page_num), flavor="stream", edge_tol=100, strip_text='\n', row_tol=10)
         for i, table in enumerate(tables):
             nrows = table.df.shape[0]
             if debug:
@@ -601,19 +601,287 @@ def merge_extraction_results(pdfplumber_df, camelot_df, debug=False):
     return pdfplumber_df
 
 
-def clean_camelot_dataframe(camelot_df, debug=False):
+def merge_long_rows(camelot_df, debug=False, word_tolerance=15):
+    """
+    Merge rows that have word_tolerance words or more in the description field.
+    Also merge up short, lowercase descriptions with the row above.
+    This helps combine split rows that are part of the same logical row.
+    """
+    if camelot_df is None or camelot_df.empty or len(camelot_df) <= 1:
+        return camelot_df
+
+    if debug:
+        print("MERGING LONG ROWS: Original shape:", camelot_df.shape)
+        print("MERGING LONG ROWS: Raw DataFrame:")
+        for idx, row in camelot_df.iterrows():
+            desc = row.iloc[0]
+            desc_clean = str(desc).replace('\n', ' ').replace('\r', ' ').strip()
+            word_count = len(desc_clean.split())
+            values = [repr(row.iloc[i]) for i in range(1, len(row))]
+            # Number detection
+            is_number = []
+            for val in values:
+                val_clean = str(val).replace('\n', ' ').replace('\r', ' ').strip()
+                if val_clean and val_clean != 'nan':
+                    if val_clean.startswith('(') and val_clean.endswith(')') and len(val_clean) > 2:
+                        bracket_content = val_clean[1:-1]
+                        is_number.append(bool(re.match(r'^[\d,]+$', bracket_content)))
+                    elif re.match(r'^-?[\d,]+\.?[\d]*$', val_clean.replace(',', '').replace('$', '')):
+                        is_number.append(True)
+                    else:
+                        is_number.append(False)
+                else:
+                    is_number.append(False)
+            print(f"Row {idx}:")
+            print(f"  Raw desc: {repr(desc)}")
+            print(f"  Clean desc: {repr(desc_clean)}")
+            print(f"  Word count: {word_count}")
+            print(f"  Values: {values}")
+            print(f"  Is number: {is_number}")
+
+    # First pass: merge down long descriptions
+    merged_rows = []
+    i = 0
+    
+    while i < len(camelot_df):
+        current_row = camelot_df.iloc[i].copy()
+        current_text = str(current_row.iloc[0]).strip() if len(current_row) > 0 else ""
+        
+        # Check if this row has numbers in later columns
+        has_numbers = False
+        for col_idx in range(1, len(current_row)):
+            val = current_row.iloc[col_idx]
+            if pd.notna(val) and str(val).strip():
+                # Check if it's a number
+                val_str = str(val).strip()
+                if val_str.startswith('(') and val_str.endswith(')') and len(val_str) > 2:
+                    bracket_content = val_str[1:-1]
+                    if re.match(r'^[\d,]+$', bracket_content):
+                        has_numbers = True
+                        break
+                elif re.match(r'^-?[\d,]+\.?[\d]*$', val_str.replace(',', '').replace('$', '')):
+                    has_numbers = True
+                    break
+        
+        # If current row has numbers, keep it as is (don't merge)
+        if has_numbers:
+            merged_rows.append(current_row)
+            i += 1
+        else:
+            # This row doesn't have numbers, check if it's a section header or should be merged down
+            def is_section_header(text):
+                if not text or text == 'nan':
+                    return False
+                
+                text = text.strip()
+                
+                # Only accept if starts with a capitalized word
+                if not text or not text[0].isupper():
+                    return False
+                
+                # Check for colon ending (common in section headers)
+                if text.endswith(':'):
+                    return True
+                
+                # Check if it's a short, standalone phrase
+                word_count = len(text.split())
+                if word_count < word_tolerance:
+                    # Check if it doesn't end with continuation words
+                    continuation_words = ['and', 'or', 'the', 'of', 'in', 'to', 'for', 'with', 'by', 'from']
+                    words = text.lower().split()
+                    if words and words[-1] not in continuation_words:
+                        # Check if it looks like a complete phrase
+                        if not text.endswith(',') and not text.endswith(';'):
+                            # Additional check: if it's just a single word, it's likely not a section header
+                            if word_count == 1:
+                                return False
+                            return True
+                
+                # Check for specific patterns that indicate section headers
+                header_patterns = [
+                    r'^[A-Z][a-z\s]+:$',  # Capitalized words ending with colon
+                    r'^[A-Z\s]+$',        # All caps (like "ASSETS")
+                    r'^[A-Z][a-z\s]+assets?$',  # Ends with "asset" or "assets"
+                    r'^[A-Z][a-z\s]+liabilities?$',  # Ends with "liability" or "liabilities"
+                    r'^[A-Z][a-z\s]+equity$',  # Ends with "equity"
+                ]
+                
+                for pattern in header_patterns:
+                    if re.match(pattern, text, re.IGNORECASE):
+                        return True
+                
+                return False
+            
+            if is_section_header(current_text):
+                # This is a section header, keep it separate
+                merged_rows.append(current_row)
+                if debug:
+                    print(f"MERGING LONG ROWS: Keeping section header: {current_text}")
+                i += 1
+            elif len(current_text.split()) >= word_tolerance:
+                # This row has word_tolerance+ words but no numbers, look ahead to find the next row with numbers
+                next_row_with_numbers = None
+                next_row_idx = None
+                
+                for j in range(i + 1, len(camelot_df)):
+                    test_row = camelot_df.iloc[j]
+                    test_text = str(test_row.iloc[0]).strip() if len(test_row) > 0 else ""
+                    
+                    # Check if this test row is a section header
+                    if is_section_header(test_text):
+                        # Stop looking, we've hit another section header
+                        break
+                    
+                    test_has_numbers = False
+                    for col_idx in range(1, len(test_row)):
+                        val = test_row.iloc[col_idx]
+                        if pd.notna(val) and str(val).strip():
+                            val_str = str(val).strip()
+                            if val_str.startswith('(') and val_str.endswith(')') and len(val_str) > 2:
+                                bracket_content = val_str[1:-1]
+                                if re.match(r'^[\d,]+$', bracket_content):
+                                    test_has_numbers = True
+                                    break
+                            elif re.match(r'^-?[\d,]+\.?[\d]*$', val_str.replace(',', '').replace('$', '')):
+                                test_has_numbers = True
+                                break
+                    
+                    if test_has_numbers:
+                        next_row_with_numbers = test_row
+                        next_row_idx = j
+                        break
+                
+                if next_row_with_numbers is not None:
+                    # Merge all rows from i to next_row_idx
+                    merged_text_parts = []
+                    merged_data = None
+                    
+                    for k in range(i, next_row_idx + 1):
+                        row = camelot_df.iloc[k]
+                        text_part = str(row.iloc[0]).strip() if len(row) > 0 else ""
+                        if text_part and text_part != 'nan':
+                            merged_text_parts.append(text_part)
+                        
+                        # Use the last row's data (which should have the numbers)
+                        if k == next_row_idx:
+                            merged_data = row.copy()
+                    
+                    if merged_text_parts and merged_data is not None:
+                        # Combine the text parts
+                        merged_text = ' '.join(merged_text_parts)
+                        merged_data.iloc[0] = merged_text
+                        merged_rows.append(merged_data)
+                        
+                        if debug:
+                            print(f"MERGING LONG ROWS: Merged rows {i}-{next_row_idx} into: {merged_text}")
+                        
+                        i = next_row_idx + 1
+                    else:
+                        # Fallback: just add current row
+                        merged_rows.append(current_row)
+                        i += 1
+                else:
+                    # No next row with numbers found, just add current row
+                    merged_rows.append(current_row)
+                    i += 1
+            else:
+                # This row has less than word_tolerance words and no numbers, keep as is
+                merged_rows.append(current_row)
+                i += 1
+    
+    # Second pass: merge up short, lowercase descriptions
+    final_rows = []
+    i = 0
+    
+    while i < len(merged_rows):
+        current_row = merged_rows[i].copy()
+        current_text = str(current_row.iloc[0]).strip() if len(current_row) > 0 else ""
+        
+        # Check if this row should be merged up (short, lowercase description)
+        def should_merge_up(text):
+            if not text or text == 'nan':
+                return False
+            
+            text = text.strip()
+            word_count = len(text.split())
+            
+            # Check if it's a short, lowercase description
+            if word_count < word_tolerance and not text.isupper():
+                # Check if it doesn't start with a capital letter (indicating it's not a section header)
+                if text and not text[0].isupper():
+                    return True
+                # Also check if it's all lowercase (common for continuation text)
+                if text.islower():
+                    return True
+            
+            return False
+        
+        if should_merge_up(current_text):
+            # This row should be merged up with the previous row
+            if final_rows:
+                # Merge with the previous row
+                prev_row = final_rows.pop()
+                prev_text = str(prev_row.iloc[0]).strip() if len(prev_row) > 0 else ""
+                
+                # Combine the texts
+                combined_text = f"{prev_text} {current_text}".strip()
+                prev_row.iloc[0] = combined_text
+                final_rows.append(prev_row)
+                
+                if debug:
+                    print(f"MERGING LONG ROWS: Merged up row {i} into previous: {combined_text}")
+            else:
+                # No previous row to merge with, keep as is
+                final_rows.append(current_row)
+        else:
+            # This row should not be merged up, keep as is
+            final_rows.append(current_row)
+        
+        i += 1
+    
+    if debug:
+        print("MERGING LONG ROWS: After merging:")
+        for idx, row in enumerate(final_rows):
+            desc = row.iloc[0]
+            desc_clean = str(desc).replace('\n', ' ').replace('\r', ' ').strip()
+            word_count = len(desc_clean.split())
+            values = [repr(row.iloc[i]) for i in range(1, len(row))]
+            print(f"Row {idx}:")
+            print(f"  Raw desc: {repr(desc)}")
+            print(f"  Clean desc: {repr(desc_clean)}")
+            print(f"  Word count: {word_count}")
+            print(f"  Values: {values}")
+
+    if final_rows:
+        result_df = pd.DataFrame(final_rows)
+        if debug:
+            print("MERGING LONG ROWS: Final shape:", result_df.shape)
+        return result_df
+    
+    return camelot_df
+
+
+def clean_camelot_dataframe(camelot_df, debug=False, word_tolerance=15):
     """
     Clean camelot DataFrame by:
-    1. Removing columns with only "..." or "$"
-    2. Merging text columns into one column
-    3. Keeping only meaningful data columns
-    4. Only keeping rows where columns 2 and 3 have numbers in them
+    1. Merging rows with word_tolerance+ words in description
+    2. Merging up short, lowercase descriptions
+    3. Removing columns with only "..." or "$"
+    4. Merging text columns into one column
+    5. Keeping only meaningful data columns
+    6. Only keeping rows where columns 2 and 3 have numbers in them
     """
     if camelot_df is None or camelot_df.empty:
         return camelot_df
     
     if debug:
         print("CLEANING: Original camelot shape:", camelot_df.shape)
+    
+    # First, merge rows with long descriptions
+    camelot_df = merge_long_rows(camelot_df, debug, word_tolerance)
+    
+    if debug:
+        print("CLEANING: After merging long rows:", camelot_df.shape)
     
     # Remove columns that contain only "..." or "$"
     columns_to_keep = []
@@ -1132,6 +1400,12 @@ def extract_table_rows_with_camelot(pdf_path, debug=False):
         click.echo(f"Extracting table rows with camelot...")
         camelot_df = extract_best_camelot_table(pdf_path, page_num=1, debug=debug)
         if camelot_df is not None:
+            # Apply merging logic BEFORE process_table_data to merge split rows
+            if debug:
+                print("CAMELOT: Applying merging logic before processing...")
+            camelot_df = merge_long_rows(camelot_df, debug=debug)
+            
+            # Now process the merged data
             camelot_df = process_table_data(camelot_df, debug)
             click.echo(f"📊 Extracted and processed table rows using camelot")
             return camelot_df
