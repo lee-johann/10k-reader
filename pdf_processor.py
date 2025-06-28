@@ -148,8 +148,12 @@ def _process_pdf_internal(pdf_path, search_text, min_page, output_path, method, 
     click.echo(f"✅ Extracted page to: {extracted_pdf_path}")
     
     # Step 3: Extract table from the page
-    excel_path = extract_table_to_excel(extracted_pdf_path, output_path, method, debug)
-    click.echo(f"✅ Table extracted to Excel: {excel_path}")
+    table_df = extract_table_to_excel(extracted_pdf_path, output_path, method, debug)
+    if table_df is not None and not table_df.empty:
+        click.echo(f"✅ Table extracted successfully with {len(table_df)} rows")
+        click.echo(f"📊 Table columns: {list(table_df.columns)}")
+    else:
+        click.echo(f"❌ Failed to extract table")
     
     click.echo(f"\n🎉 Processing complete!")
     click.echo(f"📄 Target page number: {target_page}")
@@ -1002,10 +1006,21 @@ def clean_camelot_dataframe(camelot_df, debug=False, word_tolerance=15):
 
 def extract_table_to_excel(pdf_path, output_path, method, debug=False):
     """
-    Extract tables from the PDF and save to Excel.
-    Returns the path to the Excel file.
+    Extract tables from the PDF and return the DataFrame.
+    Returns the DataFrame with extracted data.
     """
-    excel_path = output_path / "extracted_table.xlsx"
+    # Extract metadata using intelligent parsing
+    metadata = intelligent_financial_parser(pdf_path, debug=debug)
+    if metadata:
+        click.echo(f"📅 Intelligent parsing results:")
+        if metadata.get('company'):
+            click.echo(f"  Company: {metadata['company']}")
+        if metadata.get('statement_type'):
+            click.echo(f"  Statement Type: {metadata['statement_type']}")
+        if metadata.get('periods'):
+            click.echo(f"  Periods: {metadata['periods']}")
+        if metadata.get('units'):
+            click.echo(f"  Units: {metadata['units']}")
     
     # First, try to extract header information using original logic
     header_years = extract_header_info(pdf_path, debug)
@@ -1023,9 +1038,14 @@ def extract_table_to_excel(pdf_path, output_path, method, debug=False):
             new_columns = ['Description'] + header_years[:len(table_df.columns) - 1]
             table_df.columns = new_columns
         
-        table_df.to_excel(excel_path, index=False)
-        click.echo(f"📊 Hybrid extraction results saved to Excel")
-        return excel_path
+        # Add parsed result row with metadata information
+        if metadata:
+            table_df = add_parsed_result_row(table_df, metadata, debug=debug)
+            if debug:
+                print("Added parsed result row to table")
+        
+        click.echo(f"📊 Hybrid extraction completed successfully")
+        return table_df
     
     click.echo("❌ All table extraction methods failed")
     return None
@@ -1137,12 +1157,26 @@ def extract_table_hybrid(pdf_path, debug=False):
 
 
 def extract_table_from_page(pdf_path, statement_name, debug=False):
-    # Extract header information using original logic
+    # Extract metadata using intelligent parsing
+    metadata = intelligent_financial_parser(pdf_path, debug=debug)
+    if metadata:
+        click.echo(f"📅 Intelligent parsing results:")
+        if metadata.get('company'):
+            click.echo(f"  Company: {metadata['company']}")
+        if metadata.get('statement_type'):
+            click.echo(f"  Statement Type: {metadata['statement_type']}")
+        if metadata.get('periods'):
+            click.echo(f"  Periods: {metadata['periods']}")
+        if metadata.get('units'):
+            click.echo(f"  Units: {metadata['units']}")
+    
+    # Extract header information using original logic as fallback
     header_years = extract_header_info(pdf_path, debug)
     if header_years:
         click.echo(f"📅 Found year headers: {header_years}")
     else:
         click.echo("⚠️  No year headers found, using default column names")
+    
     if debug:
         print("\n=== DEBUG: Trying hybrid table extraction ===")
     
@@ -1201,161 +1235,118 @@ def extract_table_from_page(pdf_path, statement_name, debug=False):
                     print("HEADER MATCH: No rows remaining after filtering")
                 return pd.DataFrame()
         
+        # Add parsed result row with metadata information
+        if metadata:
+            table_df = add_parsed_result_row(table_df, metadata, debug=debug)
+            if debug:
+                print("Added parsed result row to table")
+        
         return table_df
     
     return None
 
 
-def extract_all_statements_to_excel(pdf_path, output_path, pdf_name, debug=False):
-    """
-    Extract all financial statements from the PDF and save to Excel with multiple tabs.
-    Returns the path to the Excel file.
-    """
-    output_path = Path(output_path)
-    excel_path = output_path / f"{pdf_name}_extracted.xlsx"
-    
-    # Redirect output to file
-    console_output_path = output_path / "console_output"
-    with ConsoleOutputRedirector(console_output_path):
-        return _extract_all_statements_to_excel_internal(pdf_path, output_path, excel_path, pdf_name, debug)
-
-
-def _extract_all_statements_to_excel_internal(pdf_path, output_path, excel_path, pdf_name, debug=False):
-    """
-    Internal function that runs with output redirection.
-    """
-    statements = [
-        "CONSOLIDATED STATEMENTS OF INCOME",
-        "CONSOLIDATED BALANCE SHEETS", 
-        "CONSOLIDATED STATEMENTS OF CASH FLOWS"
-    ]
-    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-        extracted_count = 0
-        for statement in statements:
-            click.echo(f"\n🔍 Looking for: {statement}")
-            target_page = find_page_with_text(pdf_path, statement, 3)
-            if target_page is None:
-                click.echo(f"❌ No page found with text '{statement}'")
-                continue
-            click.echo(f"✅ Found {statement} on page {target_page}")
-            extracted_pdf_path = extract_page(pdf_path, target_page, output_path)
-            if extracted_pdf_path is None:
-                click.echo(f"❌ Failed to extract page {target_page}")
-                continue
-            table_df = extract_table_from_page(extracted_pdf_path, statement, debug=debug)
-            if table_df is not None and not table_df.empty:
-                tab_name = statement.replace("CONSOLIDATED STATEMENTS OF ", "").replace("'", "").replace(" ", "_")
-                tab_name = tab_name[:31]
-                table_df.to_excel(writer, sheet_name=tab_name, index=False)
-                worksheet = writer.sheets[tab_name]
-                cell_a1 = worksheet['A1']
-                comment_text = f"From page {target_page} of {Path(pdf_path).name}"
-                cell_a1.comment = openpyxl.comments.Comment(comment_text, "PDF Processor")
-                click.echo(f"✅ Added {statement} to tab '{tab_name}' with source comment")
-                extracted_count += 1
-            else:
-                click.echo(f"❌ No table found for {statement}")
-        if extracted_count == 0:
-            click.echo("❌ No statements were successfully extracted")
-            return None
-        click.echo(f"\n🎉 Successfully extracted {extracted_count} statements to {excel_path}")
-        return excel_path
-
-
 def extract_all_statements_to_json(pdf_path, output_path, pdf_name):
     """
     Extract all financial statements from the PDF and return as JSON data.
-    Also creates Excel file locally for reference.
     Returns JSON string with extracted statements.
+    Also concatenates the extracted statement pages into a single PDF named with company and period.
     """
-    # Convert output_path to Path object if it's a string
     output_path = Path(output_path)
-    excel_path = output_path / f"{pdf_name}_extracted.xlsx"
-    
-    # Define the statements to look for
     statements = [
         "CONSOLIDATED STATEMENTS OF INCOME",
         "CONSOLIDATED BALANCE SHEETS", 
         "CONSOLIDATED STATEMENTS OF CASH FLOWS"
     ]
-    
     extracted_statements = []
-    
-    # Create Excel writer for local file
-    with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
-        for statement in statements:
-            click.echo(f"\n🔍 Looking for: {statement}")
-            
-            # Find the page with this statement
-            target_page = find_page_with_text(pdf_path, statement, 3)
-            
-            if target_page is None:
-                click.echo(f"❌ No page found with text '{statement}'")
-                continue
-            
-            click.echo(f"✅ Found {statement} on page {target_page}")
-            
-            # Extract the page
-            extracted_pdf_path = extract_page(pdf_path, target_page, output_path)
-            if extracted_pdf_path is None:
-                click.echo(f"❌ Failed to extract page {target_page}")
-                continue
-            
-            # Extract table from the page
-            table_df = extract_table_from_page(extracted_pdf_path, statement)
-            if table_df is not None and not table_df.empty:
-                # Create statement name from statement
-                statement_name = statement.replace("CONSOLIDATED STATEMENTS OF ", "").replace("CONSOLIDATED ", "").replace("'", "").replace(" ", "_")
-                
-                # Convert DataFrame to JSON-serializable format
-                statement_data = {
-                    "name": statement_name,
-                    "pageNumber": target_page,
-                    "headers": table_df.columns.tolist(),
-                    "tableData": []
-                }
-                
-                # Convert DataFrame rows to list of dictionaries
-                for _, row in table_df.iterrows():
-                    row_dict = {}
-                    for col in table_df.columns:
-                        value = row[col]
-                        # If value is a Series (ambiguous), convert to string
-                        if isinstance(value, pd.Series):
-                            value = value.astype(str).to_list()
-                            value = ", ".join(value)
-                        # Now handle missing or scalar values
-                        if value is None or (isinstance(value, float) and pd.isna(value)):
-                            row_dict[col] = ""
-                        else:
-                            row_dict[col] = str(value)
-                    statement_data["tableData"].append(row_dict)
-                
-                extracted_statements.append(statement_data)
-                
-                # Also write to Excel for local reference
-                tab_name = statement.replace("CONSOLIDATED STATEMENTS OF ", "").replace("'", "").replace(" ", "_")
-                tab_name = tab_name[:31]  # Excel tab names limited to 31 characters
-                
-                # Write to Excel tab
-                table_df.to_excel(writer, sheet_name=tab_name, index=False)
-                
-                # Add comment to cell A1 with source information
-                worksheet = writer.sheets[tab_name]
-                cell_a1 = worksheet['A1']
-                comment_text = f"From page {target_page} of {Path(pdf_path).name}"
-                cell_a1.comment = openpyxl.comments.Comment(comment_text, "PDF Processor")
-                
-                click.echo(f"✅ Extracted {statement} from page {target_page}")
-                click.echo(f"📊 Added to Excel tab '{tab_name}' with source comment")
-            else:
-                click.echo(f"❌ No table found for {statement}")
-    
+    overall_metadata = {
+        'company': None,
+        'statement_types': [],
+        'periods': [],
+        'units': []
+    }
+    extracted_pdf_paths = []
+    period_for_filename = None
+    company_for_filename = None
+    for statement in statements:
+        click.echo(f"\n🔍 Looking for: {statement}")
+        target_page = find_page_with_text(pdf_path, statement, 3)
+        if target_page is None:
+            click.echo(f"❌ No page found with text '{statement}'")
+            continue
+        click.echo(f"✅ Found {statement} on page {target_page}")
+        extracted_pdf_path = extract_page(pdf_path, target_page, output_path)
+        if extracted_pdf_path is None:
+            click.echo(f"❌ Failed to extract page {target_page}")
+            continue
+        extracted_pdf_paths.append(str(extracted_pdf_path))
+        table_df = extract_table_from_page(extracted_pdf_path, statement)
+        if table_df is not None and not table_df.empty:
+            statement_name = statement.replace("CONSOLIDATED STATEMENTS OF ", "").replace("CONSOLIDATED ", "").replace("'", "").replace(" ", "_")
+            statement_metadata = intelligent_financial_parser(extracted_pdf_path)
+            if statement_metadata:
+                if statement_metadata.get('company') and not overall_metadata['company']:
+                    overall_metadata['company'] = statement_metadata['company']
+                if statement_metadata.get('statement_type'):
+                    overall_metadata['statement_types'].append(statement_metadata['statement_type'])
+                if statement_metadata.get('periods'):
+                    overall_metadata['periods'].extend(statement_metadata['periods'])
+                if statement_metadata.get('units'):
+                    overall_metadata['units'].extend(statement_metadata['units'])
+                # For filename: use first found period and company
+                if not period_for_filename and statement_metadata.get('periods'):
+                    period_for_filename = statement_metadata['periods'][0]
+                if not company_for_filename and statement_metadata.get('company'):
+                    company_for_filename = statement_metadata['company']
+            statement_data = {
+                "name": statement_name,
+                "pageNumber": target_page,
+                "headers": table_df.columns.tolist(),
+                "tableData": [],
+                "metadata": statement_metadata or {}
+            }
+            for _, row in table_df.iterrows():
+                row_dict = {}
+                for col in table_df.columns:
+                    value = row[col]
+                    if isinstance(value, pd.Series):
+                        value = value.astype(str).to_list()
+                        value = ", ".join(value)
+                    if value is None or (isinstance(value, float) and pd.isna(value)):
+                        row_dict[col] = ""
+                    else:
+                        row_dict[col] = str(value)
+                statement_data["tableData"].append(row_dict)
+            extracted_statements.append(statement_data)
+            click.echo(f"✅ Extracted {statement} from page {target_page}")
+        else:
+            click.echo(f"❌ No table found for {statement}")
     if not extracted_statements:
         click.echo("❌ No statements were successfully extracted")
         return None
-    
-    # Perform validation checks on the extracted statements
+    # Clean up overall metadata (remove duplicates)
+    overall_metadata['statement_types'] = list(set(overall_metadata['statement_types']))
+    overall_metadata['periods'] = list(set(overall_metadata['periods']))
+    overall_metadata['units'] = list(set(overall_metadata['units']))
+    # --- Concatenate PDFs ---
+    # Use "extracted_[raw_pdf_name]" format
+    raw_pdf_name = Path(pdf_path).stem  # Get filename without extension
+    concat_pdf_name = f"extracted_{raw_pdf_name}.pdf"
+    concat_pdf_path = output_path / concat_pdf_name
+    if extracted_pdf_paths:
+        concatenate_pdfs(extracted_pdf_paths, concat_pdf_path)
+        click.echo(f"📄 Concatenated PDF created: {concat_pdf_path}")
+        
+        # Delete individual PDF pages after concatenation
+        for pdf_path_str in extracted_pdf_paths:
+            try:
+                Path(pdf_path_str).unlink()
+                click.echo(f"🗑️  Deleted individual PDF: {Path(pdf_path_str).name}")
+            except Exception as e:
+                click.echo(f"⚠️  Failed to delete {Path(pdf_path_str).name}: {e}")
+    else:
+        concat_pdf_path = None
+    # ---
     try:
         click.echo(f"🔍 Starting validation with {len(extracted_statements)} statements")
         validation_results = validate_financial_statements(extracted_statements)
@@ -1370,18 +1361,15 @@ def extract_all_statements_to_json(pdf_path, output_path, pdf_name):
             'summary': {'total_checks': 0, 'passed_checks': 0, 'failed_checks': 0, 'pass_rate': 0},
             'balance_sheet_totals': None
         }
-    
-    # Return JSON string
     result = {
         "pdfName": pdf_name,
+        "overallMetadata": overall_metadata,
         "statements": extracted_statements,
         "extractedCount": len(extracted_statements),
-        "excelPath": str(excel_path),
-        "validation": validation_results
+        "validation": validation_results,
+        "concatenatedPdf": str(concat_pdf_path) if concat_pdf_path else None
     }
-    
     click.echo(f"\n🎉 Successfully extracted {len(extracted_statements)} statements")
-    click.echo(f"📁 Excel file created locally: {excel_path}")
     return json.dumps(result)
 
 
@@ -1447,6 +1435,450 @@ def extract_table_rows_with_camelot(pdf_path, debug=False):
         return None
 
 
+def extract_period_info(text):
+    """Extract period information with flexible pattern matching"""
+    
+    # Multiple period patterns
+    period_patterns = [
+        # Three Months Ended patterns
+        r'(Three\s+Months?\s+Ended)\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4})',
+        r'(Quarter\s+Ended)\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4})',
+        r'(Q[1-4]\s+Ended)\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4})',
+        
+        # Year Ended patterns
+        r'(Year\s+Ended)\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4})',
+        r'(Fiscal\s+Year\s+Ended)\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4})',
+        r'(Twelve\s+Months?\s+Ended)\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4})',
+        
+        # As of patterns
+        r'(As\s+of)\s+([A-Za-z]+\s+\d{1,2},?\s+\d{4})',
+        r'(At\s+[A-Za-z]+\s+\d{1,2},?\s+\d{4})',
+        
+        # Simple year patterns
+        r'\b(20\d{2})\b',
+        r'([A-Za-z]+\s+\d{1,2},?\s+\d{4})'
+    ]
+    
+    periods = []
+    for pattern in period_patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        for match in matches:
+            if isinstance(match, tuple):
+                period_type, date = match
+                periods.append(f"{period_type.strip()} {date.strip()}")
+            else:
+                periods.append(match.strip())
+    
+    return list(set(periods))  # Remove duplicates
+
+
+def extract_units_info(text):
+    """Extract unit information with context awareness"""
+    
+    unit_patterns = [
+        # Standard patterns
+        r'\(in\s+([^)]+)\)',
+        r'\(([^)]*millions?[^)]*)\)',
+        r'\(([^)]*thousands?[^)]*)\)',
+        r'\(([^)]*billions?[^)]*)\)',
+        
+        # With exceptions
+        r'\(([^)]*except[^)]*per\s+share[^)]*)\)',
+        r'\(([^)]*unaudited[^)]*)\)',
+        r'\(([^)]*audited[^)]*)\)',
+        
+        # Currency patterns
+        r'\(([^)]*dollars?[^)]*)\)',
+        r'\(([^)]*USD[^)]*)\)',
+        r'\(([^)]*\$[^)]*)\)'
+    ]
+    
+    units = []
+    for pattern in unit_patterns:
+        matches = re.findall(pattern, text, re.IGNORECASE)
+        units.extend(matches)
+    
+    return list(set(units))
+
+
+def classify_statement_type(text):
+    """Classify the type of financial statement"""
+    
+    statement_patterns = {
+        'income_statement': [
+            r'CONSOLIDATED\s+STATEMENTS?\s+OF\s+INCOME',
+            r'CONSOLIDATED\s+STATEMENTS?\s+OF\s+OPERATIONS',
+            r'INCOME\s+STATEMENT',
+            r'STATEMENT\s+OF\s+OPERATIONS',
+            r'STATEMENT\s+OF\s+INCOME',
+            r'PROFIT\s+AND\s+LOSS',
+            r'P&L\s+STATEMENT'
+        ],
+        'balance_sheet': [
+            r'CONSOLIDATED\s+BALANCE\s+SHEETS?',
+            r'BALANCE\s+SHEET',
+            r'STATEMENT\s+OF\s+FINANCIAL\s+POSITION',
+            r'STATEMENT\s+OF\s+ASSETS?\s+AND\s+LIABILITIES?'
+        ],
+        'cash_flow': [
+            r'CONSOLIDATED\s+STATEMENTS?\s+OF\s+CASH\s+FLOWS?',
+            r'STATEMENT\s+OF\s+CASH\s+FLOWS?',
+            r'STATEMENT\s+OF\s+CASH\s+AND\s+CASH\s+EQUIVALENTS?'
+        ],
+        'equity': [
+            r'CONSOLIDATED\s+STATEMENTS?\s+OF\s+STOCKHOLDERS?\s+EQUITY',
+            r'STATEMENT\s+OF\s+STOCKHOLDERS?\s+EQUITY',
+            r'STATEMENT\s+OF\s+SHAREHOLDERS?\s+EQUITY',
+            r'STATEMENT\s+OF\s+CHANGES\s+IN\s+EQUITY'
+        ]
+    }
+    
+    for statement_type, patterns in statement_patterns.items():
+        for pattern in patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return statement_type
+    
+    return 'unknown'
+
+
+def extract_company_info(text):
+    """Extract company name and related information"""
+    
+    # Look for company name at the beginning
+    company_patterns = [
+        r'^([A-Z][A-Za-z\s&.,]+?)(?:\n|$)',
+        r'^([A-Z][A-Za-z\s&.,]+?)\s+CONSOLIDATED',
+        r'^([A-Z][A-Za-z\s&.,]+?)\s+INC\.',
+        r'^([A-Z][A-Za-z\s&.,]+?)\s+CORP\.',
+        r'^([A-Z][A-Za-z\s&.,]+?)\s+LLC',
+        r'^([A-Z][A-Za-z\s&.,]+?)\s+LTD\.'
+    ]
+    
+    for pattern in company_patterns:
+        match = re.search(pattern, text)
+        if match:
+            company_name = match.group(1).strip()
+            # Clean up common artifacts
+            company_name = re.sub(r'\s+', ' ', company_name)
+            return company_name
+    
+    return None
+
+
+def detect_table_headers(text_lines):
+    """Intelligently detect table headers from text lines"""
+    
+    headers = []
+    for i, line in enumerate(text_lines):
+        line_clean = line.strip()
+        
+        # Look for lines that contain date patterns
+        if re.search(r'\b(20\d{2})\b', line_clean):
+            # Check if this looks like a header row
+            if re.search(r'(ended|as of|march|june|september|december)', line_clean, re.IGNORECASE):
+                # Look ahead for more date information
+                header_parts = [line_clean]
+                
+                # Check next few lines for additional dates
+                for j in range(1, 4):
+                    if i + j < len(text_lines):
+                        next_line = text_lines[i + j].strip()
+                        if re.search(r'\b(20\d{2})\b', next_line):
+                            header_parts.append(next_line)
+                        elif re.search(r'[A-Za-z]+\s+\d{1,2},?\s+\d{4}', next_line):
+                            header_parts.append(next_line)
+                
+                # Combine header parts
+                full_header = ' '.join(header_parts)
+                headers.append(full_header)
+    
+    return headers
+
+
+def extract_financial_data_with_context(text, statement_type):
+    """Extract financial data with context awareness"""
+    
+    # Define context-specific patterns
+    context_patterns = {
+        'income_statement': {
+            'revenue': [r'revenue[s]?', r'sales', r'net\s+revenue[s]?'],
+            'expenses': [r'expense[s]?', r'cost[s]?', r'operating\s+expense[s]?'],
+            'net_income': [r'net\s+income', r'net\s+earnings', r'net\s+profit']
+        },
+        'balance_sheet': {
+            'assets': [r'asset[s]?', r'total\s+asset[s]?'],
+            'liabilities': [r'liabilit[y|ies]', r'total\s+liabilit[y|ies]'],
+            'equity': [r'equity', r'shareholders?\s+equity', r'stockholders?\s+equity']
+        },
+        'cash_flow': {
+            'operating': [r'operating\s+activities', r'cash\s+from\s+operations'],
+            'investing': [r'investing\s+activities', r'cash\s+used\s+in\s+investing'],
+            'financing': [r'financing\s+activities', r'cash\s+from\s+financing']
+        }
+    }
+    
+    # Extract data based on statement type
+    if statement_type in context_patterns:
+        extracted_data = {}
+        for category, patterns in context_patterns[statement_type].items():
+            for pattern in patterns:
+                matches = re.findall(pattern, text, re.IGNORECASE)
+                if matches:
+                    extracted_data[category] = matches
+        return extracted_data
+    
+    return {}
+
+
+def validate_extracted_data(metadata, table_data):
+    """Validate extracted data for consistency"""
+    
+    validation_results = {
+        'periods_consistent': False,
+        'units_consistent': False,
+        'data_complete': False,
+        'warnings': []
+    }
+    
+    # Check if periods are consistent
+    if metadata.get('periods'):
+        period_count = len(metadata['periods'])
+        if table_data is not None and len(table_data.columns) > 1:
+            expected_columns = period_count + 1  # +1 for description column
+            if len(table_data.columns) >= expected_columns:
+                validation_results['periods_consistent'] = True
+            else:
+                validation_results['warnings'].append(
+                    f"Expected {expected_columns} columns but found {len(table_data.columns)}"
+                )
+    
+    # Check if units are consistent
+    if metadata.get('units'):
+        validation_results['units_consistent'] = True
+    
+    # Check if data is complete
+    if table_data is not None and not table_data.empty:
+        validation_results['data_complete'] = True
+    
+    return validation_results
+
+
+def intelligent_financial_parser(pdf_path, debug=False):
+    """Main intelligent parsing function"""
+    
+    # Extract text using pdfplumber
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            page = pdf.pages[0]  # We're working with a single extracted page
+            text = page.extract_text()
+            text_lines = text.split('\n')
+    except Exception as e:
+        if debug:
+            print(f"Error extracting text: {e}")
+        return None
+    
+    # Extract metadata
+    metadata = {
+        'company': extract_company_info(text),
+        'statement_type': classify_statement_type(text),
+        'periods': extract_period_info(text),
+        'units': extract_units_info(text)
+    }
+    
+    if debug:
+        print(f"Extracted metadata: {metadata}")
+    
+    return metadata
+
+
+def add_parsed_result_row(table_df, metadata, debug=False):
+    """Add a 'parsed result' row to the table with metadata information"""
+    
+    if table_df is None or table_df.empty:
+        return table_df
+    
+    # Create the parsed result row
+    parsed_row = ['PARSED RESULT']
+    
+    # Add metadata information to each column
+    for i in range(1, len(table_df.columns)):
+        col_info = []
+        
+        # Add period information if available
+        if metadata.get('periods') and i <= len(metadata['periods']):
+            col_info.append(f"Period: {metadata['periods'][i-1]}")
+        
+        # Add units information if available
+        if metadata.get('units'):
+            units_str = '; '.join(metadata['units'])
+            col_info.append(f"Units: {units_str}")
+        
+        # Add statement type
+        if metadata.get('statement_type'):
+            col_info.append(f"Type: {metadata['statement_type']}")
+        
+        # Add company name
+        if metadata.get('company'):
+            col_info.append(f"Company: {metadata['company']}")
+        
+        # Combine all information
+        if col_info:
+            parsed_row.append(' | '.join(col_info))
+        else:
+            parsed_row.append('')
+    
+    # Create a new DataFrame with the parsed result row
+    new_df = pd.DataFrame([parsed_row], columns=table_df.columns)
+    
+    # Concatenate with original table
+    result_df = pd.concat([new_df, table_df], ignore_index=True)
+    
+    if debug:
+        print(f"Added parsed result row: {parsed_row}")
+    
+    return result_df
+
+
+def extract_all_statements_to_json_only(pdf_path, output_path, pdf_name, debug=False):
+    """
+    Extract all financial statements from the PDF and return as JSON data.
+    Returns JSON string with extracted statements.
+    Also concatenates the extracted statement pages into a single PDF named with company and period.
+    """
+    output_path = Path(output_path)
+    statements = [
+        "CONSOLIDATED STATEMENTS OF INCOME",
+        "CONSOLIDATED BALANCE SHEETS", 
+        "CONSOLIDATED STATEMENTS OF CASH FLOWS"
+    ]
+    extracted_statements = []
+    overall_metadata = {
+        'company': None,
+        'statement_types': [],
+        'periods': [],
+        'units': []
+    }
+    extracted_pdf_paths = []
+    period_for_filename = None
+    company_for_filename = None
+    for statement in statements:
+        click.echo(f"\n🔍 Looking for: {statement}")
+        target_page = find_page_with_text(pdf_path, statement, 3)
+        if target_page is None:
+            click.echo(f"❌ No page found with text '{statement}'")
+            continue
+        click.echo(f"✅ Found {statement} on page {target_page}")
+        extracted_pdf_path = extract_page(pdf_path, target_page, output_path)
+        if extracted_pdf_path is None:
+            click.echo(f"❌ Failed to extract page {target_page}")
+            continue
+        extracted_pdf_paths.append(str(extracted_pdf_path))
+        table_df = extract_table_from_page(extracted_pdf_path, statement)
+        if table_df is not None and not table_df.empty:
+            statement_name = statement.replace("CONSOLIDATED STATEMENTS OF ", "").replace("CONSOLIDATED ", "").replace("'", "").replace(" ", "_")
+            statement_metadata = intelligent_financial_parser(extracted_pdf_path)
+            if statement_metadata:
+                if statement_metadata.get('company') and not overall_metadata['company']:
+                    overall_metadata['company'] = statement_metadata['company']
+                if statement_metadata.get('statement_type'):
+                    overall_metadata['statement_types'].append(statement_metadata['statement_type'])
+                if statement_metadata.get('periods'):
+                    overall_metadata['periods'].extend(statement_metadata['periods'])
+                if statement_metadata.get('units'):
+                    overall_metadata['units'].extend(statement_metadata['units'])
+                # For filename: use first found period and company
+                if not period_for_filename and statement_metadata.get('periods'):
+                    period_for_filename = statement_metadata['periods'][0]
+                if not company_for_filename and statement_metadata.get('company'):
+                    company_for_filename = statement_metadata['company']
+            statement_data = {
+                "name": statement_name,
+                "pageNumber": target_page,
+                "headers": table_df.columns.tolist(),
+                "tableData": [],
+                "metadata": statement_metadata or {}
+            }
+            for _, row in table_df.iterrows():
+                row_dict = {}
+                for col in table_df.columns:
+                    value = row[col]
+                    if isinstance(value, pd.Series):
+                        value = value.astype(str).to_list()
+                        value = ", ".join(value)
+                    if value is None or (isinstance(value, float) and pd.isna(value)):
+                        row_dict[col] = ""
+                    else:
+                        row_dict[col] = str(value)
+                statement_data["tableData"].append(row_dict)
+            extracted_statements.append(statement_data)
+            click.echo(f"✅ Extracted {statement} from page {target_page}")
+        else:
+            click.echo(f"❌ No table found for {statement}")
+    if not extracted_statements:
+        click.echo("❌ No statements were successfully extracted")
+        return None
+    # Clean up overall metadata (remove duplicates)
+    overall_metadata['statement_types'] = list(set(overall_metadata['statement_types']))
+    overall_metadata['periods'] = list(set(overall_metadata['periods']))
+    overall_metadata['units'] = list(set(overall_metadata['units']))
+    # --- Concatenate PDFs ---
+    # Use "extracted_[raw_pdf_name]" format
+    raw_pdf_name = Path(pdf_path).stem  # Get filename without extension
+    concat_pdf_name = f"extracted_{raw_pdf_name}.pdf"
+    concat_pdf_path = output_path / concat_pdf_name
+    if extracted_pdf_paths:
+        concatenate_pdfs(extracted_pdf_paths, concat_pdf_path)
+        click.echo(f"📄 Concatenated PDF created: {concat_pdf_path}")
+        
+        # Delete individual PDF pages after concatenation
+        for pdf_path_str in extracted_pdf_paths:
+            try:
+                Path(pdf_path_str).unlink()
+                click.echo(f"🗑️  Deleted individual PDF: {Path(pdf_path_str).name}")
+            except Exception as e:
+                click.echo(f"⚠️  Failed to delete {Path(pdf_path_str).name}: {e}")
+    else:
+        concat_pdf_path = None
+    # ---
+    try:
+        click.echo(f"🔍 Starting validation with {len(extracted_statements)} statements")
+        validation_results = validate_financial_statements(extracted_statements)
+        click.echo(f"✅ Validation completed: {validation_results['summary']['passed_checks']}/{validation_results['summary']['total_checks']} checks passed ({validation_results['summary']['pass_rate']}%)")
+        click.echo(f"🔍 Validation results: {validation_results}")
+    except Exception as e:
+        click.echo(f"⚠️  Validation failed: {e}")
+        import traceback
+        click.echo(f"⚠️  Validation error details: {traceback.format_exc()}")
+        validation_results = {
+            'checklist_results': {},
+            'summary': {'total_checks': 0, 'passed_checks': 0, 'failed_checks': 0, 'pass_rate': 0},
+            'balance_sheet_totals': None
+        }
+    result = {
+        "pdfName": pdf_name,
+        "overallMetadata": overall_metadata,
+        "statements": extracted_statements,
+        "extractedCount": len(extracted_statements),
+        "validation": validation_results,
+        "concatenatedPdf": str(concat_pdf_path) if concat_pdf_path else None
+    }
+    click.echo(f"\n🎉 Successfully extracted {len(extracted_statements)} statements")
+    return json.dumps(result)
+
+
+def concatenate_pdfs(pdf_paths, output_path):
+    """Concatenate multiple PDFs into a single PDF at output_path."""
+    merger = PyPDF2.PdfWriter()
+    for pdf_path in pdf_paths:
+        with open(pdf_path, 'rb') as f:
+            reader = PyPDF2.PdfReader(f)
+            for page in reader.pages:
+                merger.add_page(page)
+    with open(output_path, 'wb') as fout:
+        merger.write(fout)
+    return output_path
+
+
 if __name__ == '__main__':
     import sys
     
@@ -1466,7 +1898,7 @@ if __name__ == '__main__':
         click.echo = stderr_echo
         
         # Call the JSON function directly
-        result = extract_all_statements_to_json(pdf_path, output_path, pdf_name)
+        result = extract_all_statements_to_json_only(pdf_path, output_path, pdf_name)
         if result:
             print(result)  # Print JSON to stdout for Java to capture
             sys.exit(0)

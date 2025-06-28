@@ -1,8 +1,10 @@
 PyPDF2==3.0.1
-pdfplumber==0.10.3
-pandas==2.1.4
+pdfplumber>=0.9.0
+pandas>=1.5.0
 openpyxl==3.1.2
 click==8.1.7
 tabula-py==2.8.2
-camelot-py[cv]==0.11.0
-opencv-python==4.8.1.78 
+camelot-py[cv]>=0.11.0
+opencv-python>=4.8.0
+ghostscript>=0.7
+Pillow>=9.0.0 
