@@ -7,6 +7,11 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.type.TypeReference;
+import org.springframework.http.*;
+import org.springframework.web.client.RestTemplate;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
 
 import java.io.*;
 import java.nio.file.Files;
@@ -20,9 +25,29 @@ public class PdfProcessingService {
 
     private static final String DOCUMENTS_DIR = "../documents";
     private static final String OUTPUT_DIR = "output";
+    private static final String PYTHON_API_BASE_URL = "http://localhost:5001";
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final RestTemplate restTemplate = new RestTemplate();
 
     public List<String> getAvailablePdfs() {
+        try {
+            // Call Python API to get available documents
+            String url = PYTHON_API_BASE_URL + "/api/list-documents";
+            ResponseEntity<Map> response = restTemplate.getForEntity(url, Map.class);
+
+            if (response.getStatusCode() == HttpStatus.OK && response.getBody() != null) {
+                Map<String, Object> responseBody = response.getBody();
+                if (Boolean.TRUE.equals(responseBody.get("success"))) {
+                    @SuppressWarnings("unchecked")
+                    List<String> documents = (List<String>) responseBody.get("documents");
+                    return documents != null ? documents : new ArrayList<>();
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Error calling Python API for documents: " + e.getMessage());
+        }
+
+        // Fallback to local directory scanning
         List<String> pdfFiles = new ArrayList<>();
         try {
             File documentsDir = new File(DOCUMENTS_DIR);
@@ -35,116 +60,98 @@ public class PdfProcessingService {
                 }
             }
         } catch (Exception e) {
-            // Log error but return empty list
             System.err.println("Error reading documents directory: " + e.getMessage());
         }
         return pdfFiles;
     }
 
     public ProcessingResult processPdfFromDocuments(String filename) throws IOException {
-        // Create output directory if it doesn't exist
-        createDirectories();
-
-        // Check if file exists in documents folder
-        Path pdfPath = Paths.get(DOCUMENTS_DIR, filename);
-        if (!Files.exists(pdfPath)) {
-            return new ProcessingResult(null, null, "PDF file not found: " + filename, false);
-        }
-
         try {
-            // Run Python script to extract all statements
-            ProcessBuilder processBuilder = new ProcessBuilder(
-                    "python3", "pdf_processor.py", "documents/" + filename, OUTPUT_DIR, filename.replace(".pdf", ""));
-            processBuilder.directory(new File(".."));
+            // Create output directory if it doesn't exist
+            createDirectories();
 
-            Process process = processBuilder.start();
-
-            // Capture stdout (JSON) and stderr (log messages) separately
-            BufferedReader stdoutReader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-            BufferedReader stderrReader = new BufferedReader(new InputStreamReader(process.getErrorStream()));
-
-            StringBuilder jsonOutput = new StringBuilder();
-            StringBuilder logOutput = new StringBuilder();
-
-            // Read stdout (JSON data)
-            String line;
-            while ((line = stdoutReader.readLine()) != null) {
-                jsonOutput.append(line).append("\n");
+            // Check if file exists in documents folder
+            Path pdfPath = Paths.get(DOCUMENTS_DIR, filename);
+            if (!Files.exists(pdfPath)) {
+                return new ProcessingResult(null, null, "PDF file not found: " + filename, false);
             }
 
-            // Read stderr (log messages) - just for logging, not for parsing
-            while ((line = stderrReader.readLine()) != null) {
-                logOutput.append(line).append("\n");
+            // Call Python API to process PDF from path
+            String url = PYTHON_API_BASE_URL + "/api/process-pdf-from-path";
+
+            Map<String, Object> requestBody = new HashMap<>();
+            requestBody.put("pdf_path", pdfPath.toString());
+            requestBody.put("output_dir", OUTPUT_DIR);
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+
+            HttpEntity<Map<String, Object>> requestEntity = new HttpEntity<>(requestBody, headers);
+
+            ResponseEntity<Map> response = restTemplate.postForEntity(url, requestEntity, Map.class);
+
+            if (response.getStatusCode() == HttpStatus.OK && response.getBody() != null) {
+                Map<String, Object> responseBody = response.getBody();
+                if (Boolean.TRUE.equals(responseBody.get("success"))) {
+                    return parseApiResponse(responseBody);
+                } else {
+                    String error = (String) responseBody.get("error");
+                    return new ProcessingResult(null, null, "Python API error: " + error, false);
+                }
+            } else {
+                return new ProcessingResult(null, null, "Python API returned status: " + response.getStatusCode(),
+                        false);
             }
-
-            int exitCode = process.waitFor();
-
-            if (exitCode != 0) {
-                return new ProcessingResult(null, null, "Python script failed: " + logOutput.toString(), false);
-            }
-
-            // Parse JSON response from Python script (stdout only)
-            ProcessingResult result = parseJsonFromOutput(jsonOutput.toString());
-
-            return result;
 
         } catch (Exception e) {
             return new ProcessingResult(null, null, "Error processing PDF: " + e.getMessage(), false);
         }
     }
 
-    // Keep the old method for backward compatibility
     public ProcessingResult processPdf(MultipartFile file) throws IOException {
-        // Create directories if they don't exist
-        createDirectories();
-
-        // Save uploaded file
-        String originalFilename = file.getOriginalFilename();
-        String savedFilename = System.currentTimeMillis() + "_" + originalFilename;
-        Path uploadPath = Paths.get("uploads", savedFilename);
-        Files.createDirectories(Paths.get("uploads"));
-        Files.copy(file.getInputStream(), uploadPath);
-
         try {
-            // Run Python script to extract all statements
-            ProcessBuilder processBuilder = new ProcessBuilder(
-                    "python3", "pdf_processor.py", uploadPath.toString(), OUTPUT_DIR,
-                    originalFilename.replace(".pdf", ""));
-            processBuilder.directory(new File(".."));
+            // Create directories if they don't exist
+            createDirectories();
 
-            Process process = processBuilder.start();
+            // Call Python API to process uploaded PDF
+            String url = PYTHON_API_BASE_URL + "/api/process-pdf";
 
-            // Capture stdout (JSON) and stderr (log messages) separately
-            BufferedReader stdoutReader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-            BufferedReader stderrReader = new BufferedReader(new InputStreamReader(process.getErrorStream()));
+            // Prepare multipart request
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.MULTIPART_FORM_DATA);
 
-            StringBuilder jsonOutput = new StringBuilder();
-            StringBuilder logOutput = new StringBuilder();
+            MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+            body.add("file", new ByteArrayResource(file.getBytes()) {
+                @Override
+                public String getFilename() {
+                    return file.getOriginalFilename();
+                }
+            });
+            body.add("output_dir", OUTPUT_DIR);
 
-            // Read stdout (JSON data)
-            String line;
-            while ((line = stdoutReader.readLine()) != null) {
-                jsonOutput.append(line).append("\n");
+            HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
+
+            ResponseEntity<Map> response = restTemplate.postForEntity(url, requestEntity, Map.class);
+
+            if (response.getStatusCode() == HttpStatus.OK && response.getBody() != null) {
+                Map<String, Object> responseBody = response.getBody();
+                if (Boolean.TRUE.equals(responseBody.get("success"))) {
+                    ProcessingResult result = parseApiResponse(responseBody);
+
+                    // Set the PDF URL for uploaded files
+                    String originalFilename = file.getOriginalFilename();
+                    String savedFilename = System.currentTimeMillis() + "_" + originalFilename;
+                    result.setPdfUrl("/uploads/" + savedFilename);
+
+                    return result;
+                } else {
+                    String error = (String) responseBody.get("error");
+                    return new ProcessingResult(null, null, "Python API error: " + error, false);
+                }
+            } else {
+                return new ProcessingResult(null, null, "Python API returned status: " + response.getStatusCode(),
+                        false);
             }
-
-            // Read stderr (log messages) - just for logging, not for parsing
-            while ((line = stderrReader.readLine()) != null) {
-                logOutput.append(line).append("\n");
-            }
-
-            int exitCode = process.waitFor();
-
-            if (exitCode != 0) {
-                return new ProcessingResult(null, null, "Python script failed: " + logOutput.toString(), false);
-            }
-
-            // Parse JSON response from Python script (stdout only)
-            ProcessingResult result = parseJsonFromOutput(jsonOutput.toString());
-
-            // Set the PDF URL for uploaded files
-            result.setPdfUrl("/uploads/" + savedFilename);
-
-            return result;
 
         } catch (Exception e) {
             return new ProcessingResult(null, null, "Error processing PDF: " + e.getMessage(), false);
@@ -155,18 +162,13 @@ public class PdfProcessingService {
         Files.createDirectories(Paths.get(OUTPUT_DIR));
     }
 
-    private ProcessingResult parseJsonFromOutput(String jsonOutput) throws IOException {
+    private ProcessingResult parseApiResponse(Map<String, Object> responseBody) throws IOException {
         List<ProcessingResult.StatementData> statements = new ArrayList<>();
         ProcessingResult.ValidationData validationData = null;
 
         try {
-            // Parse the JSON response
-            Map<String, Object> jsonResponse = objectMapper.readValue(jsonOutput,
-                    new TypeReference<Map<String, Object>>() {
-                    });
-
             @SuppressWarnings("unchecked")
-            List<Map<String, Object>> statementsList = (List<Map<String, Object>>) jsonResponse.get("statements");
+            List<Map<String, Object>> statementsList = (List<Map<String, Object>>) responseBody.get("statements");
 
             if (statementsList != null) {
                 for (Map<String, Object> statementData : statementsList) {
@@ -207,17 +209,22 @@ public class PdfProcessingService {
 
             // Parse validation data
             @SuppressWarnings("unchecked")
-            Map<String, Object> validationMap = (Map<String, Object>) jsonResponse.get("validation");
+            Map<String, Object> validationMap = (Map<String, Object>) responseBody.get("validation");
 
             if (validationMap != null) {
                 validationData = parseValidationData(validationMap);
             }
 
         } catch (Exception e) {
-            throw new IOException("Failed to parse JSON response: " + e.getMessage(), e);
+            throw new IOException("Failed to parse API response: " + e.getMessage(), e);
         }
 
-        return new ProcessingResult(null, statements, "Processing completed successfully", true, validationData);
+        String message = (String) responseBody.get("message");
+        if (message == null) {
+            message = "Processing completed successfully";
+        }
+
+        return new ProcessingResult(null, statements, message, true, validationData);
     }
 
     private ProcessingResult.ValidationData parseValidationData(Map<String, Object> validationMap) {
