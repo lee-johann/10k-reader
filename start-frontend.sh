@@ -23,6 +23,9 @@ if [ ! -d "node_modules" ]; then
     npm install
 fi
 
+# Explicitly set PORT to 3000 to avoid conflicts
+export PORT=3000
+
 # Start the development server
 echo "Starting the development server on http://localhost:3000"
 npm start 

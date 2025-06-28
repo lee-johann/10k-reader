@@ -70,6 +70,55 @@ wait_for_service() {
     return 1
 }
 
+# Function to start Python API server
+start_python_api() {
+    print_status "Starting Python PDF Processing API Server..."
+    
+    # Check if Python is installed
+    if ! command -v python3 &> /dev/null; then
+        print_error "Python 3 is not installed. Please install Python 3."
+        return 1
+    fi
+    
+    # Check if virtual environment exists, create if not
+    if [ ! -d ".venv" ]; then
+        print_status "Creating Python virtual environment..."
+        python3 -m venv .venv
+        if [ $? -ne 0 ]; then
+            print_error "Failed to create virtual environment"
+            return 1
+        fi
+    fi
+    
+    # Activate virtual environment and install dependencies
+    source .venv/bin/activate
+    
+    # Install required packages
+    print_status "Installing Python dependencies..."
+    pip install flask flask-cors > python-api.log 2>&1
+    if [ $? -ne 0 ]; then
+        print_error "Failed to install Python dependencies"
+        return 1
+    fi
+    
+    # Set environment variables
+    export FLASK_DEBUG=True
+    export PORT=5001
+    
+    # Start the API server
+    python3 pdf_api_server.py > python-api.log 2>&1 &
+    PYTHON_API_PID=$!
+    
+    # Wait for Python API to be ready
+    if wait_for_service 5001 "Python API"; then
+        print_success "Python API started successfully (PID: $PYTHON_API_PID)"
+        return 0
+    else
+        print_error "Python API failed to start"
+        return 1
+    fi
+}
+
 # Function to start backend
 start_backend() {
     print_status "Starting Spring Boot Backend..."
@@ -149,6 +198,9 @@ start_frontend() {
         fi
     fi
     
+    # Explicitly set PORT to 3000 to avoid conflicts
+    export PORT=3000
+    
     # Start the development server
     npm start > ../frontend.log 2>&1 &
     FRONTEND_PID=$!
@@ -169,10 +221,14 @@ stop_services() {
     print_status "Stopping all services..."
     
     # Kill processes on specific ports
+    kill_port_processes 5001 "Python API"
     kill_port_processes 8080 "Backend"
     kill_port_processes 3000 "Frontend"
     
     # Kill any remaining processes
+    if [ ! -z "$PYTHON_API_PID" ]; then
+        kill $PYTHON_API_PID 2>/dev/null
+    fi
     if [ ! -z "$BACKEND_PID" ]; then
         kill $BACKEND_PID 2>/dev/null
     fi
@@ -181,7 +237,7 @@ stop_services() {
     fi
     
     # Clean up log files
-    rm -f backend.log frontend.log
+    rm -f backend.log frontend.log python-api.log
     
     print_success "All services stopped"
 }
@@ -191,6 +247,12 @@ show_status() {
     echo ""
     print_status "Service Status:"
     echo "=================="
+    
+    if check_port 5001; then
+        print_success "Python API: Running on port 5001"
+    else
+        print_error "Python API: Not running"
+    fi
     
     if check_port 8080; then
         print_success "Backend: Running on port 8080"
@@ -209,7 +271,10 @@ show_status() {
     echo "============="
     print_status "Frontend: http://localhost:3000"
     print_status "Backend API: http://localhost:8080"
-    print_status "Health Check: http://localhost:8080/api/pdf/health"
+    print_status "Python API: http://localhost:5001"
+    print_status "Health Checks:"
+    print_status "  - Backend: http://localhost:8080/api/pdf/health"
+    print_status "  - Python API: http://localhost:5001/health"
 }
 
 # Main script logic
@@ -240,32 +305,44 @@ main() {
         echo "  status     - Show service status"
         echo "  help       - Show this help message"
         echo ""
+        echo "Services:"
+        echo "  - Python API Server (port 5001)"
+        echo "  - Spring Boot Backend (port 8080)"
+        echo "  - React Frontend (port 3000)"
+        echo ""
         exit 0
     fi
     
     # Make scripts executable
-    chmod +x start-backend.sh start-frontend.sh 2>/dev/null
+    chmod +x start-backend.sh start-frontend.sh start-python-api.sh 2>/dev/null
     
-    # Start backend
-    if start_backend; then
-        # Start frontend
-        if start_frontend; then
-            echo ""
-            print_success "🎉 Application started successfully!"
-            show_status
-            echo ""
-            print_status "Press Ctrl+C to stop all services"
-            
-            # Wait for user to stop
-            trap 'echo ""; print_status "Shutting down..."; stop_services; exit 0' INT
-            wait
+    # Start Python API first (required by backend)
+    if start_python_api; then
+        # Start backend
+        if start_backend; then
+            # Start frontend
+            if start_frontend; then
+                echo ""
+                print_success "🎉 Application started successfully!"
+                show_status
+                echo ""
+                print_status "Press Ctrl+C to stop all services"
+                
+                # Wait for user to stop
+                trap 'echo ""; print_status "Shutting down..."; stop_services; exit 0' INT
+                wait
+            else
+                print_error "Failed to start frontend"
+                stop_services
+                exit 1
+            fi
         else
-            print_error "Failed to start frontend"
+            print_error "Failed to start backend"
             stop_services
             exit 1
         fi
     else
-        print_error "Failed to start backend"
+        print_error "Failed to start Python API"
         exit 1
     fi
 }
