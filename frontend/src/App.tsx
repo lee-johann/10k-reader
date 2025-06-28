@@ -14,11 +14,36 @@ interface StatementData {
   headers: string[];
 }
 
+interface ValidationResults {
+  checklistResults: { [key: string]: boolean };
+  summary: {
+    totalChecks: number;
+    passedChecks: number;
+    failedChecks: number;
+    passRate: number;
+  };
+  balanceSheetTotals?: {
+    assets?: {
+      calculated: number;
+      reported: number;
+      difference: number;
+      matches: boolean;
+    };
+    liabilitiesEquity?: {
+      calculated: number;
+      reported: number;
+      difference: number;
+      matches: boolean;
+    };
+  };
+}
+
 interface ProcessingResult {
   pdfUrl?: string;
   statements: StatementData[];
   message: string;
   success: boolean;
+  validation?: ValidationResults;
 }
 
 function App() {
@@ -26,6 +51,8 @@ function App() {
   const [selectedPdf, setSelectedPdf] = useState<string>('');
   const [result, setResult] = useState<ProcessingResult | null>(null);
   const [loading, setLoading] = useState(false);
+  const [validating, setValidating] = useState(false);
+  const [extractingTables, setExtractingTables] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
   const [numPages, setNumPages] = useState<number | null>(null);
   const [activeTab, setActiveTab] = useState<string>('');
@@ -331,6 +358,8 @@ function App() {
     if (!selectedPdf) return;
 
     setLoading(true);
+    setValidating(false);
+    setExtractingTables(false);
     setResult(null);
 
     try {
@@ -344,16 +373,52 @@ function App() {
       });
 
       if (response.data.success) {
-        setResult(response.data);
-        if (response.data.statements.length > 0) {
-          setCurrentPage(response.data.statements[0].pageNumber);
-        }
+        // Phase 1: Show PDF immediately (without tables or validation)
+        const resultWithPdfOnly = {
+          ...response.data,
+          statements: [], // Remove statements initially
+          validation: undefined // Remove validation data initially
+        };
+        setResult(resultWithPdfOnly);
+        setLoading(false);
+
+        // Phase 2: Show table extraction loading
+        setExtractingTables(true);
+
+        // Simulate table extraction time for better UX
+        setTimeout(() => {
+          // Show result with tables but no validation
+          const resultWithTables = {
+            ...response.data,
+            validation: undefined // Remove validation data initially
+          };
+          setResult(resultWithTables);
+          setExtractingTables(false);
+
+          if (response.data.statements.length > 0) {
+            setCurrentPage(response.data.statements[0].pageNumber);
+          }
+
+          // Phase 3: If validation data exists, show it after a brief delay
+          if (response.data.validation) {
+            console.log('Validation data found:', response.data.validation);
+            setValidating(true);
+            // Simulate validation processing time for better UX
+            setTimeout(() => {
+              console.log('Setting full result with validation');
+              setResult(response.data); // Show full result with validation
+              setValidating(false);
+            }, 1000);
+          } else {
+            console.log('No validation data found in response');
+          }
+        }, 1500); // Table extraction takes longer than validation
       } else {
         console.error('Processing failed:', response.data.message);
+        setLoading(false);
       }
     } catch (err) {
       console.error('Failed to process PDF:', err);
-    } finally {
       setLoading(false);
     }
   };
@@ -536,11 +601,6 @@ function App() {
 
           {result && result.success && (
             <div className="results-section">
-              {/* Debug Mode Toggle */}
-              {/* <button onClick={() => setDebugMode(v => !v)} style={{marginBottom: 8}}>
-                {debugMode ? 'Disable' : 'Enable'} Debug Mode
-              </button> */}
-
               <div className="pdf-viewer" ref={pdfViewerRef}>
                 <h3>PDF Viewer</h3>
                 <Document
@@ -559,68 +619,295 @@ function App() {
                 </Document>
               </div>
 
-              <div className="tables-section">
-                <h3>Extracted Tables</h3>
-                <div className="tabs">
-                  {result.statements.map((statement, index) => (
-                    <button
-                      key={statement.name}
-                      className={`tab ${activeTab === statement.name ? 'active' : ''}`}
-                      onClick={() => handleTabClick(statement.name, statement.pageNumber)}
-                    >
-                      {statement.name} (Page {statement.pageNumber})
-                    </button>
-                  ))}
+              {/* Table Extraction Loading Indicator */}
+              {extractingTables && (
+                <div className="table-extraction-loading">
+                  <h3>Extracting Financial Tables</h3>
+                  <div className="loading-indicator">
+                    <div className="spinner"></div>
+                    <p>Analyzing PDF structure and extracting table data...</p>
+                    <p className="loading-detail">Using hybrid extraction (Camelot + pdfplumber) for optimal results</p>
+                  </div>
                 </div>
-                <div className="table-content">
-                  {result.statements.length > 0 && (
-                    <div>
-                      {(() => {
-                        const activeStatement = result.statements.find(s => s.name === activeTab) || result.statements[0];
-                        return (
-                          <div>
-                            <h4>{activeStatement.name} (Page {activeStatement.pageNumber})</h4>
-                            <div className="table-container">
-                              <table>
-                                <thead>
-                                  <tr>
-                                    {activeStatement.headers.map((header: string, index: number) => (
-                                      <th key={index}>{header}</th>
-                                    ))}
-                                  </tr>
-                                </thead>
-                                <tbody>
-                                  {activeStatement.tableData.map((row: { [key: string]: string }, rowIndex: number) => (
-                                    <tr key={rowIndex}>
-                                      {activeStatement.headers.map((header: string, colIndex: number) => (
-                                        <td
-                                          key={colIndex}
-                                          onMouseEnter={(e) => handleTableCellHover(row[header] || '', activeStatement.pageNumber)}
-                                          onMouseLeave={handleTableCellLeave}
-                                          onContextMenu={e => handleCellRightClick(e, activeStatement.name, rowIndex, colIndex)}
-                                          onMouseDown={e => handleCellMouseDown(e, activeStatement.name, rowIndex, colIndex)}
-                                          onMouseOver={e => handleCellMouseOver(e, activeStatement.name, rowIndex, colIndex)}
-                                          className={
-                                            (markedCells.has(getCellKey(activeStatement.name, rowIndex, colIndex)) ? 'green-marked-cell ' : '') +
-                                            (selectedCells.has(getCellKey(activeStatement.name, rowIndex, colIndex)) ? 'blue-selected-cell' : '')
-                                          }
-                                          style={{ userSelect: 'none' }}
-                                        >
-                                          {row[header] || ''}
-                                        </td>
+              )}
+
+              {/* Tables Section - Only show when tables are extracted */}
+              {result.statements.length > 0 && !extractingTables && (
+                <div className="tables-section">
+                  <h3>Extracted Tables</h3>
+                  <div className="tabs">
+                    {result.statements.map((statement, index) => (
+                      <button
+                        key={statement.name}
+                        className={`tab ${activeTab === statement.name ? 'active' : ''}`}
+                        onClick={() => handleTabClick(statement.name, statement.pageNumber)}
+                      >
+                        {statement.name} (Page {statement.pageNumber})
+                      </button>
+                    ))}
+                  </div>
+                  <div className="table-content">
+                    {result.statements.length > 0 && (
+                      <div>
+                        {(() => {
+                          const activeStatement = result.statements.find(s => s.name === activeTab) || result.statements[0];
+                          return (
+                            <div>
+                              <h4>{activeStatement.name} (Page {activeStatement.pageNumber})</h4>
+                              <div className="table-container">
+                                <table>
+                                  <thead>
+                                    <tr>
+                                      {activeStatement.headers.map((header: string, index: number) => (
+                                        <th key={index}>{header}</th>
                                       ))}
                                     </tr>
-                                  ))}
-                                </tbody>
-                              </table>
+                                  </thead>
+                                  <tbody>
+                                    {activeStatement.tableData.map((row: { [key: string]: string }, rowIndex: number) => (
+                                      <tr key={rowIndex}>
+                                        {activeStatement.headers.map((header: string, colIndex: number) => (
+                                          <td
+                                            key={colIndex}
+                                            onMouseEnter={(e) => handleTableCellHover(row[header] || '', activeStatement.pageNumber)}
+                                            onMouseLeave={handleTableCellLeave}
+                                            onContextMenu={e => handleCellRightClick(e, activeStatement.name, rowIndex, colIndex)}
+                                            onMouseDown={e => handleCellMouseDown(e, activeStatement.name, rowIndex, colIndex)}
+                                            onMouseOver={e => handleCellMouseOver(e, activeStatement.name, rowIndex, colIndex)}
+                                            className={
+                                              (markedCells.has(getCellKey(activeStatement.name, rowIndex, colIndex)) ? 'green-marked-cell ' : '') +
+                                              (selectedCells.has(getCellKey(activeStatement.name, rowIndex, colIndex)) ? 'blue-selected-cell' : '')
+                                            }
+                                            style={{ userSelect: 'none' }}
+                                          >
+                                            {row[header] || ''}
+                                          </td>
+                                        ))}
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
                             </div>
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  )}
+                          );
+                        })()}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Validation Loading Indicator */}
+          {result && result.success && validating && (
+            <div className="validation-loading">
+              <h3>Financial Statement Validation</h3>
+              <div className="loading-indicator">
+                <div className="spinner"></div>
+                <p>Running financial validation checks...</p>
+                <p className="loading-detail">Analyzing balance sheet totals, income statement ratios, and cross-statement consistency</p>
+              </div>
+            </div>
+          )}
+
+          {/* Financial Statement Checklist Section */}
+          {result && result.success && !validating && result.validation && (
+            <div className="checklist-section">
+              <h3>Financial Statement Checklist</h3>
+              <div className="validation-summary">
+                <p>
+                  <strong>Validation Summary:</strong> {result.validation.summary.passedChecks}/{result.validation.summary.totalChecks} checks passed ({result.validation.summary.passRate}%)
+                </p>
+                {result.validation.balanceSheetTotals && (
+                  <div className="balance-sheet-totals">
+                    <p><strong>Balance Sheet Totals:</strong></p>
+                    {result.validation.balanceSheetTotals.assets && (
+                      <p>Assets: {result.validation.balanceSheetTotals.assets.matches ? '✅' : '❌'}
+                        Calculated: ${result.validation.balanceSheetTotals.assets.calculated.toLocaleString()},
+                        Reported: ${result.validation.balanceSheetTotals.assets.reported.toLocaleString()}
+                        {!result.validation.balanceSheetTotals.assets.matches &&
+                          ` (Difference: $${result.validation.balanceSheetTotals.assets.difference.toLocaleString()})`}
+                      </p>
+                    )}
+                    {result.validation.balanceSheetTotals.liabilitiesEquity && (
+                      <p>Liabilities + Equity: {result.validation.balanceSheetTotals.liabilitiesEquity.matches ? '✅' : '❌'}
+                        Calculated: ${result.validation.balanceSheetTotals.liabilitiesEquity.calculated.toLocaleString()},
+                        Reported: ${result.validation.balanceSheetTotals.liabilitiesEquity.reported.toLocaleString()}
+                        {!result.validation.balanceSheetTotals.liabilitiesEquity.matches &&
+                          ` (Difference: $${result.validation.balanceSheetTotals.liabilitiesEquity.difference.toLocaleString()})`}
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="checklist-container">
+                <div className="checklist-category">
+                  <h4>Balance Sheet Checks</h4>
+                  <div className="checklist-items">
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.balance_sheet_1 || false} disabled />
+                      <span>Assets = Liabilities + Stockholders' Equity</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.balance_sheet_2 || false} disabled />
+                      <span>Current assets &gt; Current liabilities (working capital positive)</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.balance_sheet_3 || false} disabled />
+                      <span>Cash and cash equivalents reasonable level</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.balance_sheet_4 || false} disabled />
+                      <span>Accounts receivable aging reasonable</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.balance_sheet_5 || false} disabled />
+                      <span>Inventory levels appropriate</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.balance_sheet_6 || false} disabled />
+                      <span>Property, plant & equipment properly valued</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.balance_sheet_7 || false} disabled />
+                      <span>Goodwill and intangibles reasonable</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.balance_sheet_8 || false} disabled />
+                      <span>Debt levels manageable</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.balance_sheet_9 || false} disabled />
+                      <span>Retained earnings consistent with history</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div className="checklist-category">
+                  <h4>Income Statement Checks</h4>
+                  <div className="checklist-items">
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.income_statement_1 || false} disabled />
+                      <span>Revenue recognition appropriate</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.income_statement_2 || false} disabled />
+                      <span>Gross margin consistent with industry</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.income_statement_3 || false} disabled />
+                      <span>Operating expenses reasonable</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.income_statement_4 || false} disabled />
+                      <span>EBITDA margins stable</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.income_statement_5 || false} disabled />
+                      <span>Interest expense coverage adequate</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.income_statement_6 || false} disabled />
+                      <span>Tax rate reasonable</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.income_statement_7 || false} disabled />
+                      <span>Net income growth sustainable</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.income_statement_8 || false} disabled />
+                      <span>EPS calculations accurate</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div className="checklist-category">
+                  <h4>Cash Flow Statement Checks</h4>
+                  <div className="checklist-items">
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cash_flow_1 || false} disabled />
+                      <span>Operating cash flow positive</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cash_flow_2 || false} disabled />
+                      <span>Operating cash flow &gt; Net income</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cash_flow_3 || false} disabled />
+                      <span>Capital expenditures reasonable</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cash_flow_4 || false} disabled />
+                      <span>Free cash flow positive</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cash_flow_5 || false} disabled />
+                      <span>Dividend payments sustainable</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cash_flow_6 || false} disabled />
+                      <span>Share repurchases appropriate</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cash_flow_7 || false} disabled />
+                      <span>Debt issuance/repayment reasonable</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cash_flow_8 || false} disabled />
+                      <span>Cash balance changes logical</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div className="checklist-category">
+                  <h4>Cross-Statement Checks</h4>
+                  <div className="checklist-items">
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cross_statement_1 || false} disabled />
+                      <span>Net income flows to retained earnings</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cross_statement_2 || false} disabled />
+                      <span>Depreciation consistent across statements</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cross_statement_3 || false} disabled />
+                      <span>Dividends reduce retained earnings</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cross_statement_4 || false} disabled />
+                      <span>Capital expenditures increase PP&E</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cross_statement_5 || false} disabled />
+                      <span>Debt changes reflected in both statements</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cross_statement_6 || false} disabled />
+                      <span>Working capital changes consistent</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cross_statement_7 || false} disabled />
+                      <span>Tax payments align with tax expense</span>
+                    </label>
+                    <label className="checklist-item">
+                      <input type="checkbox" checked={result.validation?.checklistResults.cross_statement_8 || false} disabled />
+                      <span>Stock-based compensation properly recorded</span>
+                    </label>
+                  </div>
                 </div>
               </div>
+            </div>
+          )}
+
+          {/* Debug: Show validation status */}
+          {result && result.success && debugMode && (
+            <div style={{ marginTop: '20px', padding: '10px', backgroundColor: '#f0f0f0', borderRadius: '4px', fontSize: '12px' }}>
+              <strong>DEBUG - Validation Status:</strong><br />
+              Validating: {String(validating)}<br />
+              Has validation data: {String(!!result.validation)}<br />
+              Validation data: {result.validation ? JSON.stringify(result.validation, null, 2) : 'None'}
             </div>
           )}
         </div>
@@ -657,6 +944,13 @@ function App() {
           </Document>
         </div>
       )}
+
+      {/* Debug Mode Toggle at the bottom */}
+      <div style={{ marginTop: 32, textAlign: 'center' }}>
+        <button onClick={() => setDebugMode(v => !v)}>
+          {debugMode ? 'Disable' : 'Enable'} Debug Mode
+        </button>
+      </div>
     </div>
   );
 }
